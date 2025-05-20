@@ -11,21 +11,39 @@ st.title("📁 Multi-Vendor Paysheet Comparator")
 vendor_file = st.file_uploader("Upload Vendor Paysheet (Multiple Sheets)", type=["xlsx"])
 system_file = st.file_uploader("Upload System Paysheet", type=["xlsx"])
 
-def is_match(val1, val2):
+@st.cache_data(show_spinner=False)
+def load_system_file(file):
+    preview = pd.read_excel(file, sheet_name=0, nrows=10, header=None)
+    header_row = find_header_row(preview)
+    df_full = pd.read_excel(file, sheet_name=0, header=header_row)
+    df_full.columns = [str(col).strip().lower() for col in df_full.columns]
+    return df_full
+
+@st.cache_data(show_spinner=False)
+def load_vendor_sheet(file, sheet_name, header_row):
+    df = pd.read_excel(file, sheet_name=sheet_name, header=header_row)
+    df.columns = [str(col).strip().lower() for col in df.columns]
+    return df
+
+
+def normalize_text(val):
+    return " ".join(str(val).strip().lower().split())
+
+
+def is_match(val1, val2, col_name):
+    if col_name.lower() == "employee name":
+        return normalize_text(val1) == normalize_text(val2)
     try:
-        v = str(val1).strip().split(".")[0]
-        s = str(val2).strip().split(".")[0]
-        return v == s
+        v = float(val1)
+        s = float(val2)
+        return abs(v - s) <= 2
     except:
         return False
 
+
 if vendor_file and system_file and st.button("🔍 Run Batch Comparison"):
     try:
-        preview_system = pd.read_excel(system_file, sheet_name=0, nrows=10, header=None)
-        system_header_row = find_header_row(preview_system)
-        df_system_full = pd.read_excel(system_file, sheet_name=0, header=system_header_row)
-        df_system_full.columns = [str(col).strip().lower() for col in df_system_full.columns]
-
+        df_system_full = load_system_file(system_file)
         vendor_xl = pd.ExcelFile(vendor_file)
         headcount_data = []
         all_comparisons = {}
@@ -35,8 +53,7 @@ if vendor_file and system_file and st.button("🔍 Run Batch Comparison"):
                 vendor_file, system_file, sheet_name, 0
             )
 
-            df_vendor = pd.read_excel(vendor_file, sheet_name=sheet_name, header=vendor_header_row)
-            df_vendor.columns = [str(col).strip().lower() for col in df_vendor.columns]
+            df_vendor = load_vendor_sheet(vendor_file, sheet_name, vendor_header_row)
 
             emp_col = None
             system_emp_col = None
@@ -51,18 +68,21 @@ if vendor_file and system_file and st.button("🔍 Run Batch Comparison"):
                 st.warning(f"⚠️ No employee ID mapping for vendor sheet '{sheet_name}'. Skipping.")
                 continue
 
+            # === Vendor name detection ===
+            vendor_col = next((col for col in df_vendor.columns if any(k in col for k in ["vendor", "contractor"])), None)
             vendor_name = None
-            possible_vendor_cols = [col for col in df_vendor.columns if "vendor" in col or "contractor" in col]
-            if possible_vendor_cols:
-                vendor_col = possible_vendor_cols[0]
-                vendor_name = df_vendor[vendor_col].dropna().astype(str).str.lower().str.strip().mode().iloc[0]
+            if vendor_col:
+                try:
+                    vendor_name = df_vendor[vendor_col].dropna().astype(str).str.lower().str.strip().mode().iloc[0]
+                except:
+                    pass
 
             if not vendor_name:
                 st.warning(f"⚠️ Could not detect vendor name from data in sheet '{sheet_name}'. Skipping.")
                 continue
 
             system_filtered = df_system_full.copy()
-            system_vendor_col = next((col for col in df_system_full.columns if "vendor" in col or "contractor" in col), None)
+            system_vendor_col = next((col for col in df_system_full.columns if any(k in col for k in ["vendor", "contractor"])), None)
             if system_vendor_col:
                 system_filtered = df_system_full[df_system_full[system_vendor_col].astype(str).str.lower().str.strip() == vendor_name]
 
@@ -93,22 +113,22 @@ if vendor_file and system_file and st.button("🔍 Run Batch Comparison"):
                 "system_emp_col": system_emp_col
             }
 
-        st.subheader("👥 Headcount Summary")
-        df_headcount = pd.DataFrame(headcount_data)
-        st.dataframe(df_headcount, use_container_width=True)
-
         st.session_state["comparisons"] = all_comparisons
-        st.session_state["df_headcount"] = df_headcount
+        st.session_state["df_headcount"] = pd.DataFrame(headcount_data)
 
     except Exception as e:
         st.error(f"❌ Error during batch processing: {e}")
+
+if "df_headcount" in st.session_state:
+    st.subheader("👥 Headcount Summary")
+    st.dataframe(st.session_state["df_headcount"], use_container_width=True)
 
 # === Step 7: Column Comparison ===
 if "comparisons" in st.session_state:
     st.markdown("---")
     st.subheader("📊 Column Comparison Preview")
     vendor_list = list(st.session_state["comparisons"].keys())
-    selected_vendor = st.selectbox("Choose a vendor to compare:", vendor_list)
+    selected_vendor = st.selectbox("Choose a vendor to compare:", vendor_list, key="vendor_selector")
 
     data = st.session_state["comparisons"][selected_vendor]
     df_vendor = data["vendor"]
@@ -117,26 +137,28 @@ if "comparisons" in st.session_state:
     emp_col = data["emp_col"]
 
     valid_cols = [k for k, v in mapping.items() if k in df_vendor.columns and v in df_system.columns]
-    selected_cols = st.multiselect("Select columns to compare:", valid_cols, default=valid_cols[:5])
+    default_selection = "invoice value" if "invoice value" in valid_cols else valid_cols[:1]
+    selected_cols = st.multiselect("Select columns to compare:", valid_cols, default=default_selection, key="col_selector")
 
     if selected_cols:
-        rows = []
+        results = []
         for emp_id in df_vendor.index:
-            for col in selected_cols:
-                v_val = df_vendor.at[emp_id, col] if col in df_vendor.columns else None
-                s_col = mapping[col]
-                s_val = df_system.at[emp_id, s_col] if s_col in df_system.columns else None
+            vendor_row = df_vendor.loc[emp_id]
+            system_row = df_system.loc[emp_id] if emp_id in df_system.index else pd.Series()
 
-                match = is_match(v_val, s_val)
+            for col in selected_cols:
+                v_val = vendor_row.get(col)
+                s_col = mapping[col]
+                s_val = system_row.get(s_col)
+
+                match = is_match(v_val, s_val, col)
                 diff = None
                 try:
-                    v_num = float(str(v_val).strip().split(".")[0])
-                    s_num = float(str(s_val).strip().split(".")[0])
-                    diff = v_num - s_num
+                    diff = float(v_val) - float(s_val)
                 except:
                     pass
 
-                rows.append({
+                results.append({
                     "Employee ID": emp_id,
                     f"{col} | Vendor Value": v_val,
                     f"{col} | System Value": s_val,
@@ -145,14 +167,7 @@ if "comparisons" in st.session_state:
                     "": ""  # Spacer
                 })
 
-        df_final = pd.DataFrame(rows)
-        show_only_mismatches = st.toggle("Show only mismatches", value=True)
-
-        if show_only_mismatches:
-            mismatch_cols = [col for col in df_final.columns if col.endswith("| Match")]
-            mask = df_final[mismatch_cols].apply(lambda row: any(val == "❌" for val in row), axis=1)
-            df_final = df_final[mask]
-
+        df_final = pd.DataFrame(results)
         st.dataframe(df_final, use_container_width=True)
 
         match_cols = [col for col in df_final.columns if col.endswith("| Match")]

@@ -246,6 +246,17 @@ def compare_rows(
         
         # Compare each mapped column
         for vendor_col, system_col in header_mapping.items():
+            # Skip employee number column if it's in the mapping (already added manually)
+            # Normalize column names for comparison
+            vendor_col_normalized = str(vendor_col).strip().lower().replace(" ", "_")
+            system_col_normalized = str(system_col).strip().lower().replace(" ", "_")
+            emp_vendor_normalized = str(employee_number_vendor_col).strip().lower().replace(" ", "_")
+            emp_system_normalized = str(employee_number_system_col).strip().lower().replace(" ", "_")
+            
+            if (vendor_col_normalized == emp_vendor_normalized or 
+                system_col_normalized == emp_system_normalized):
+                continue
+            
             if vendor_col in df_vendor.columns and system_col in df_system.columns:
                 # Get values using .get() with explicit column access
                 vendor_val = vendor_row[vendor_col] if vendor_col in vendor_row.index else None

@@ -1,0 +1,20 @@
+# Python cache and logs
+__pycache__/
+*.py[cod]
+*.log
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Environment variables
+.env
+
+# Request logs (keep directory, ignore JSON files)
+request_logs/*.json
+request_logs/*.txt
+
+# OS metadata
+.DS_Store
+Thumbs.db

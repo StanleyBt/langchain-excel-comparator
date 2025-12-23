@@ -15,6 +15,10 @@ venv/
 request_logs/*.json
 request_logs/*.txt
 
+# Data and output folders
+data/
+output/
+
 # OS metadata
 .DS_Store
 Thumbs.db

@@ -154,9 +154,15 @@ def compare_rows(
     header_mapping: Dict[str, str],
     employee_number_vendor_col: Optional[str] = None,
     employee_number_system_col: Optional[str] = None
-) -> List[RowComparisonResult]:
+) -> Dict[str, Any]:
     """
     Compare rows between vendor and system DataFrames row by row.
+    
+    Returns:
+        Dictionary with:
+        - "results": List of RowComparisonResult for matched employees
+        - "only_in_vendor_count": Count of employees only in vendor
+        - "only_in_system_count": Count of employees only in system
     
     Args:
         df_vendor: Vendor paysheet DataFrame
@@ -230,6 +236,14 @@ def compare_rows(
         all_match = True
         employee_mismatches = []
         
+        # Add employee number as the first column comparison
+        emp_num_comp = compare_column_values(
+            str(emp_id),
+            str(emp_id),
+            "Employee Number"
+        )
+        column_comparisons.append(emp_num_comp)
+        
         # Compare each mapped column
         for vendor_col, system_col in header_mapping.items():
             if vendor_col in df_vendor.columns and system_col in df_system.columns:
@@ -266,45 +280,18 @@ def compare_rows(
     # Log comparison summary
     perfect_matches = sum(1 for r in results if r.overallMatch)
     mismatches = sum(1 for r in results if not r.overallMatch)
-    print(f"📊 Comparison: {perfect_matches} perfect, {mismatches} with mismatches")
+    print(f"📊 Comparison: {perfect_matches} perfect matches, {mismatches} with mismatches")
     
-    # Handle employees only in vendor
-    for emp_id in only_in_vendor:
-        vendor_row = df_vendor[df_vendor[employee_number_vendor_col] == emp_id].iloc[0]
-        column_comparisons = []
-        
-        for vendor_col, system_col in header_mapping.items():
-            if vendor_col in df_vendor.columns:
-                vendor_val = vendor_row.get(vendor_col)
-                display_col_name = format_column_name(system_col)
-                col_comp = compare_column_values(vendor_val, None, display_col_name)
-                column_comparisons.append(col_comp)
-        
-        results.append(RowComparisonResult(
-            employeeNumber=str(emp_id),
-            columnComparisons=column_comparisons,
-            overallMatch=False,
-            rowStatus="only_in_vendor"
-        ))
+    # Log unmatched employees (for information only, not included in response)
+    if only_in_vendor:
+        print(f"ℹ️  {len(only_in_vendor)} employees only in vendor (not included in response)")
+    if only_in_system:
+        print(f"ℹ️  {len(only_in_system)} employees only in system (not included in response)")
     
-    # Handle employees only in system
-    for emp_id in only_in_system:
-        system_row = df_system[df_system[employee_number_system_col] == emp_id].iloc[0]
-        column_comparisons = []
-        
-        for vendor_col, system_col in header_mapping.items():
-            if system_col in df_system.columns:
-                system_val = system_row.get(system_col)
-                display_col_name = format_column_name(system_col)
-                col_comp = compare_column_values(None, system_val, display_col_name)
-                column_comparisons.append(col_comp)
-        
-        results.append(RowComparisonResult(
-            employeeNumber=str(emp_id),
-            columnComparisons=column_comparisons,
-            overallMatch=False,
-            rowStatus="only_in_system"
-        ))
-    
-    return results
+    # Return matched employees and counts of unmatched employees
+    return {
+        "results": results,
+        "only_in_vendor_count": len(only_in_vendor),
+        "only_in_system_count": len(only_in_system)
+    }
 

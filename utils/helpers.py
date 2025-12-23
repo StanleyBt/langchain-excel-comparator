@@ -65,7 +65,12 @@ def calculate_match_rate(row_comparisons: List[RowComparisonResult]) -> float:
     return matched_comparisons / total_comparisons
 
 
-def calculate_basic_summary(row_comparisons: List[RowComparisonResult], columns_compared: int) -> Dict[str, any]:
+def calculate_basic_summary(
+    row_comparisons: List[RowComparisonResult], 
+    columns_compared: int,
+    only_in_vendor_count: int = 0,
+    only_in_system_count: int = 0
+) -> Dict[str, any]:
     """Calculate basic summary statistics"""
     total_rows = len(row_comparisons)
     matched_rows = sum(1 for r in row_comparisons if r.overallMatch)
@@ -76,8 +81,8 @@ def calculate_basic_summary(row_comparisons: List[RowComparisonResult], columns_
         "totalRows": total_rows,
         "matchedRows": matched_rows,
         "unmatchedRows": unmatched_rows,
-        "onlyInVendor": sum(1 for r in row_comparisons if r.rowStatus == "only_in_vendor"),
-        "onlyInSystem": sum(1 for r in row_comparisons if r.rowStatus == "only_in_system"),
+        "onlyInVendor": only_in_vendor_count,
+        "onlyInSystem": only_in_system_count,
         "matchRate": match_rate,
         "columnsCompared": columns_compared
     }

@@ -295,14 +295,24 @@ async def match_headers(request: HeaderMatchingRequest):
                 )
             
             # Perform row-by-row comparison
-            row_comparisons = compare_rows(
+            comparison_result = compare_rows(
                 df_vendor=df_vendor,
                 df_system=df_system,
                 header_mapping=normalized_mapping
             )
             
+            # Extract results and unmatched counts
+            row_comparisons = comparison_result["results"]
+            only_in_vendor_count = comparison_result["only_in_vendor_count"]
+            only_in_system_count = comparison_result["only_in_system_count"]
+            
             # Calculate summary statistics
-            summary = calculate_basic_summary(row_comparisons, len(normalized_mapping))
+            summary = calculate_basic_summary(
+                row_comparisons, 
+                len(normalized_mapping),
+                only_in_vendor_count=only_in_vendor_count,
+                only_in_system_count=only_in_system_count
+            )
             total_rows = summary["totalRows"]
             matched_rows = summary["matchedRows"]
             unmatched_rows = summary["unmatchedRows"]
@@ -459,14 +469,24 @@ async def compare_paysheets(request: ComparisonRequest):
             )   
         
         # Perform row-by-row comparison
-        row_comparisons = compare_rows(
+        comparison_result = compare_rows(
             df_vendor=df_vendor,
             df_system=df_system,
             header_mapping=normalized_mapping
         )
         
+        # Extract results and unmatched counts
+        row_comparisons = comparison_result["results"]
+        only_in_vendor_count = comparison_result["only_in_vendor_count"]
+        only_in_system_count = comparison_result["only_in_system_count"]
+        
         # Calculate summary statistics
-        summary = calculate_basic_summary(row_comparisons, len(normalized_mapping))
+        summary = calculate_basic_summary(
+            row_comparisons, 
+            len(normalized_mapping),
+            only_in_vendor_count=only_in_vendor_count,
+            only_in_system_count=only_in_system_count
+        )
         total_rows = summary["totalRows"]
         matched_rows = summary["matchedRows"]
         unmatched_rows = summary["unmatchedRows"]

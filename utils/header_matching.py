@@ -211,6 +211,45 @@ def match_headers_ai(
     return matched_headers, unmatched_constant_header_names, unmatched_vendor_headers, constant_headers_status
 
 
+def _get_semantic_context_for_header(const_header: str) -> str:
+    """
+    Get semantic context/description for a constant header to help AI understand its real-world meaning.
+    """
+    context_map = {
+        "EMPLOYEE_NUMBER": """
+BUSINESS MEANING: Unique identifier for an employee (e.g., "EMP001", "12345", "10007")
+- This is an IDENTIFIER, not a name
+- Usually text/string (may have leading zeros)
+- Used to uniquely identify employees across systems
+- Examples: "employee_number", "employee_id", "emp_no", "employee_code"
+- REJECT: "employee_name", "employee_name_full" (these are names, not numbers/IDs)
+""",
+        "NET_PAY": """
+BUSINESS MEANING: Employee's take-home pay AFTER all deductions (taxes, insurance, PF, etc.)
+- This is the FINAL amount the employee receives
+- Calculated as: Gross Pay - All Deductions = Net Pay
+- Examples: "net_pay", "netpay", "net_salary", "take_home", "net_amount"
+- REJECT: "gross_pay" (before deductions), "total_payable" (total to be paid, different concept), 
+  "basic_pay" (base component), "total_pay" (could be gross)
+- KEY DISTINCTION: "total_payable" means "total amount that needs to be paid" (could be gross or invoice amount),
+  while "net_pay" means "what employee takes home after deductions" - these are DIFFERENT concepts
+""",
+        "INVOICE_VALUE": """
+BUSINESS MEANING: The monetary value/amount on an invoice or bill
+- This is the AMOUNT to be paid, not a count or number
+- Examples: "invoice_value", "invoice_amount", "invoice_total", "bill_amount"
+- REJECT: "invoice_number" (ID, not amount), "invoice_count" (quantity, not value), 
+  "invoice_date" (date, not amount)
+"""
+    }
+    
+    return context_map.get(const_header, f"""
+BUSINESS MEANING: {const_header}
+- Analyze what this header represents in real-world payroll/paysheet systems
+- Match only if vendor and system headers represent the same business concept
+""")
+
+
 def _ai_semantic_matching_for_constant_header(
     const_header: str,
     potential_vendor: List[str],
@@ -242,9 +281,16 @@ def _ai_semantic_matching_for_constant_header(
         api_version=AZURE_API_VERSION
     )
     
+    # Get semantic context for the constant header
+    semantic_context = _get_semantic_context_for_header(const_header)
+    
     # Create a smart prompt that helps AI understand semantic differences
     prompt = f"""
-You are a data assistant matching column headers for the constant header: "{const_header}"
+You are a data assistant matching column headers for payroll/paysheet data.
+
+CONSTANT HEADER TO MATCH: "{const_header}"
+
+{semantic_context}
 
 Expected variations for this header: {expected_variations}
 
@@ -255,8 +301,8 @@ System headers that might match:
 {potential_system}
 
 CRITICAL SEMANTIC MATCHING RULES:
-1. Match vendor headers to system headers ONLY if they are semantically appropriate for "{const_header}"
-2. Analyze the MEANING and DATA TYPE expected by the constant header name
+1. Match vendor headers to system headers ONLY if they represent the SAME REAL-WORLD CONCEPT
+2. Understand the BUSINESS MEANING of "{const_header}" - not just keywords
 3. STRICTLY REJECT semantically incorrect matches based on these patterns:
 
    TYPE MISMATCHES (REJECT these):
@@ -272,8 +318,17 @@ CRITICAL SEMANTIC MATCHING RULES:
    
    - AMOUNT vs COUNT: If constant header expects an AMOUNT (monetary value),
      REJECT headers with: "count", "quantity", "qty", "number of", "total items"
-     ✅ ACCEPT: "amount", "value", "price", "cost", "total"
+     ✅ ACCEPT: "amount", "value", "price", "cost"
      ❌ REJECT: "count", "quantity", "qty"
+   
+   - NET vs GROSS vs TOTAL vs PAYABLE: Understand the payroll context:
+     * NET_PAY = Employee's take-home pay AFTER all deductions (taxes, insurance, etc.)
+     * GROSS_PAY = Employee's pay BEFORE deductions
+     * TOTAL_PAYABLE = Total amount to be paid (could be gross, could include other components)
+     * BASIC_PAY = Base salary component (before allowances/deductions)
+     * If constant header is NET_PAY, REJECT: "gross", "total payable", "basic", "total pay"
+     * If constant header is NET_PAY, ACCEPT: "net pay", "netpay", "net salary", "take home"
+     * Understand: "total_payable" ≠ "net_pay" (total payable is what needs to be paid, net pay is after deductions)
    
    - PERCENTAGE vs DECIMAL: If constant header expects PERCENTAGE,
      REJECT headers with: "decimal", "ratio", "fraction" (unless they also say "percent")
@@ -293,24 +348,23 @@ CRITICAL SEMANTIC MATCHING RULES:
    - Only return matches that make semantic sense
    - If no good semantic match exists, return an empty JSON object {{}}
 
-5. CONTEXT AWARENESS:
-   - Consider the constant header name: "{const_header}"
-   - What type of data does this header logically represent?
-   - Does the vendor header represent the same type of data?
+5. REAL-WORLD CONTEXT AWARENESS:
+   - Think about what this column represents in actual payroll/paysheet systems
+   - Consider business logic: Would these two columns have the same value in real payroll?
+   - If the meanings are different, even if keywords overlap, REJECT the match
+   - When in doubt, REJECT - it's better to require manual mapping than create incorrect matches
+
+6. PAYROLL-SPECIFIC UNDERSTANDING:
+   - Employee Number: Unique identifier (text, may have leading zeros) - NOT employee name
+   - Net Pay: Take-home amount after ALL deductions - NOT gross, NOT total payable, NOT basic
+   - Invoice Value: Amount on invoice/bill - NOT invoice count, NOT invoice number
+   - Understand that payroll terms have specific meanings - don't match based on partial keyword overlap
 
 ⚠️ Return output as JSON only, in this format:
 {{"vendor_header": "system_header"}} or {{}} if no good match
 
-Examples of GOOD matches:
-- "contractor name" → "contractor" (for CONTRACTOR) ✅ Name matches name
-- "employee number" → "employee_number" (for EMPLOYEE_NUMBER) ✅ Number matches number
-- "invoice amount" → "invoice_amount" (for INVOICE_AMOUNT) ✅ Amount matches amount
-
-Examples of BAD matches (MUST REJECT - return {{}}):
-- "contractor id" → "contractor" (for CONTRACTOR) ❌ ID ≠ Name
-- "employee name" → "employee_number" (for EMPLOYEE_NUMBER) ❌ Name ≠ Number
-- "invoice count" → "invoice_amount" (for INVOICE_AMOUNT) ❌ Count ≠ Amount
-- "days count" → "days_payable" (for DAYS_PAYABLE) ❌ Count ≠ Payable (amount)
+IMPORTANT: If you're unsure whether two headers represent the same concept, return {{}} (empty object).
+It's better to require manual mapping than to create an incorrect automatic match.
 """
     
     response = llm.invoke([HumanMessage(content=prompt)])

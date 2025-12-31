@@ -3,6 +3,7 @@ import pandas as pd
 import re
 from typing import Dict, List, Optional, Any, Tuple
 from models.schemas import RowComparisonResult, ColumnComparison
+from config import TEXT_ONLY_COLUMNS
 
 
 def format_column_name(column_name: str) -> str:
@@ -56,6 +57,56 @@ def normalize_text(val: Any) -> str:
     return " ".join(text.lower().split())
 
 
+def normalize_column_name_for_check(column_name: str) -> str:
+    """
+    Normalize column name for checking against TEXT_ONLY_COLUMNS list.
+    Converts to lowercase, removes spaces/underscores for flexible matching.
+    
+    Args:
+        column_name: Column name to normalize
+        
+    Returns:
+        Normalized column name for comparison
+    """
+    if not column_name:
+        return ""
+    # Convert to lowercase, replace spaces/underscores with nothing, strip
+    normalized = str(column_name).strip().lower().replace(" ", "").replace("_", "")
+    return normalized
+
+
+def is_text_only_column(column_name: str) -> bool:
+    """
+    Check if a column should always be treated as text (never as numeric).
+    
+    This ensures columns like EMPLOYEE_NUMBER are always compared as text,
+    preserving leading zeros and preventing numeric conversion issues.
+    
+    Args:
+        column_name: Column name to check
+        
+    Returns:
+        True if column should be treated as text-only, False otherwise
+    """
+    if not column_name:
+        return False
+    
+    # Normalize the input column name
+    col_normalized = normalize_column_name_for_check(column_name)
+    
+    # Check against all text-only column patterns
+    for text_only_pattern in TEXT_ONLY_COLUMNS:
+        pattern_normalized = normalize_column_name_for_check(text_only_pattern)
+        
+        # Check for exact match or if pattern is contained in column name
+        if (col_normalized == pattern_normalized or 
+            pattern_normalized in col_normalized or 
+            col_normalized in pattern_normalized):
+            return True
+    
+    return False
+
+
 def is_numeric_match(val1: Any, val2: Any, tolerance: float = 2.00) -> Tuple[bool, Optional[float]]:
     """
     Check if two numeric values match within tolerance.
@@ -96,6 +147,9 @@ def compare_column_values(
     """
     Compare values from vendor and system for a single column.
     
+    Employee numbers and other text-only columns are always treated as text
+    to preserve leading zeros and prevent numeric conversion issues.
+    
     Args:
         vendor_value: Value from vendor paysheet
         system_value: Value from system paysheet
@@ -104,16 +158,20 @@ def compare_column_values(
     Returns:
         ColumnComparison object with comparison results
     """
-    # Determine if column is numeric based on values
+    # Check if this column should always be treated as text (e.g., EMPLOYEE_NUMBER)
+    force_text = is_text_only_column(column_name)
+    
+    # Determine if column is numeric based on values (only if not forced to text)
     is_numeric = False
-    try:
-        if vendor_value is not None and not pd.isna(vendor_value):
-            float(vendor_value)
-        if system_value is not None and not pd.isna(system_value):
-            float(system_value)
-        is_numeric = True
-    except (ValueError, TypeError):
-        pass
+    if not force_text:
+        try:
+            if vendor_value is not None and not pd.isna(vendor_value):
+                float(vendor_value)
+            if system_value is not None and not pd.isna(system_value):
+                float(system_value)
+            is_numeric = True
+        except (ValueError, TypeError):
+            pass
     
     # Handle None/NaN values
     vendor_is_none = vendor_value is None or pd.isna(vendor_value)
@@ -130,13 +188,23 @@ def compare_column_values(
             matchType="both_none"
         )
     
-    if is_numeric:
+    if is_numeric and not force_text:
         is_match, difference = is_numeric_match(vendor_value, system_value)
         match_type = "numeric_tolerance" if is_match else "numeric_mismatch"
     else:
-        is_match = is_text_match(vendor_value, system_value)
+        # Always use text matching for text-only columns or non-numeric values
+        # For text-only columns, preserve original string representation
+        if force_text:
+            # For text-only columns, compare as exact strings (preserve case/format)
+            vendor_str = str(vendor_value).strip() if vendor_value is not None and not pd.isna(vendor_value) else ""
+            system_str = str(system_value).strip() if system_value is not None and not pd.isna(system_value) else ""
+            is_match = vendor_str == system_str
+            match_type = "text_exact" if is_match else "text_mismatch"
+        else:
+            # For regular text columns, use normalized comparison
+            is_match = is_text_match(vendor_value, system_value)
+            match_type = "text_normalized" if is_match else "text_mismatch"
         difference = None
-        match_type = "text_normalized" if is_match else "text_mismatch"
     
     return ColumnComparison(
         columnName=column_name,

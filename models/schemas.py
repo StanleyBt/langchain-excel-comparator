@@ -140,6 +140,9 @@ class ColumnStatistic(BaseModel):
     minDifference: Optional[float] = Field(None, description="Minimum difference (for numeric columns)")
     mismatchPercentage: float = Field(..., description="Percentage of mismatches")
     topMismatches: List[ColumnMismatchDetail] = Field(default_factory=list, description="Top mismatches for this column")
+    vendorPaysheetCount: Optional[float] = Field(None, description="Total sum of all vendor values for this column (numeric columns only)")
+    systemPaysheetCount: Optional[float] = Field(None, description="Total sum of all system values for this column (numeric columns only)")
+    headcount: Optional[int] = Field(None, description="Headcount/matched count (only for Employee Number column)")
 
 
 class KeyFinding(BaseModel):

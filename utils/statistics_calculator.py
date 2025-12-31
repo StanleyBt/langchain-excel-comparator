@@ -4,6 +4,7 @@ from models.schemas import (
     RowComparisonResult, ColumnComparison, OverallSummary, ColumnStatistic,
     ColumnMismatchDetail, Insights, KeyFinding, ColumnHealth, QuickStats
 )
+from utils.comparison_engine import is_text_only_column
 
 
 def calculate_overall_summary(
@@ -67,6 +68,42 @@ def calculate_column_statistics(
         max_diff = max(numeric_diffs) if numeric_diffs else None
         min_diff = min(numeric_diffs) if numeric_diffs else None
         
+        # Calculate vendor and system sums (for numeric columns only)
+        # Skip text-only columns (e.g., Employee Number, Contractor)
+        vendor_sum = None
+        system_sum = None
+        
+        # Check if this is a text-only column - don't calculate sums for text columns
+        is_text_column = is_text_only_column(col_name)
+        
+        if not is_text_column:
+            # Try to calculate sums for numeric values (only for non-text columns)
+            vendor_numeric_values = []
+            system_numeric_values = []
+            
+            for cc in comparisons:
+                # Try to convert vendor value to float
+                if cc.vendorValue is not None:
+                    try:
+                        vendor_val = float(cc.vendorValue)
+                        vendor_numeric_values.append(vendor_val)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Try to convert system value to float
+                if cc.systemValue is not None:
+                    try:
+                        system_val = float(cc.systemValue)
+                        system_numeric_values.append(system_val)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Only set sums if we have numeric values (indicates numeric column)
+            if vendor_numeric_values:
+                vendor_sum = sum(vendor_numeric_values)
+            if system_numeric_values:
+                system_sum = sum(system_numeric_values)
+        
         # Get top mismatches with employee numbers
         mismatch_tuples = [(cc, emp_id) for cc, emp_id in comparison_tuples if not cc.isMatch]
         mismatch_tuples.sort(key=lambda x: abs(x[0].difference) if x[0].difference is not None else 0, reverse=True)
@@ -81,6 +118,14 @@ def calculate_column_statistics(
             for cc, emp_id in mismatch_tuples[:top_n]
         ]
         
+        # Determine if this is Employee Number column for headcount
+        col_name_lower = col_name.lower().strip()
+        is_employee_number = (
+            "employee" in col_name_lower and 
+            ("number" in col_name_lower or "no" in col_name_lower or "id" in col_name_lower)
+        )
+        headcount = matched if is_employee_number else None
+        
         column_stats.append(ColumnStatistic(
             columnName=col_name,
             totalComparisons=total,
@@ -92,7 +137,10 @@ def calculate_column_statistics(
             maxDifference=max_diff,
             minDifference=min_diff,
             mismatchPercentage=(mismatched / total * 100) if total > 0 else 0.0,
-            topMismatches=top_mismatches
+            topMismatches=top_mismatches,
+            vendorPaysheetCount=vendor_sum,
+            systemPaysheetCount=system_sum,
+            headcount=headcount
         ))
     
     return column_stats

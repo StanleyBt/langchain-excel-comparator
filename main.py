@@ -321,7 +321,7 @@ async def match_headers(request: HeaderMatchingRequest):
             # Calculate enhanced statistics
             from utils.statistics_calculator import (
                 calculate_overall_summary,
-                calculate_column_statistics,
+                calculate_column_statistics,    
                 calculate_insights,
                 calculate_quick_stats
             )
@@ -331,8 +331,11 @@ async def match_headers(request: HeaderMatchingRequest):
             insights = calculate_insights(row_comparisons, column_statistics)
             quick_stats = calculate_quick_stats(row_comparisons, column_statistics)
             
+            # Filter to only show mismatched employees in response (statistics already calculated from full data)
+            filtered_row_comparisons = [r for r in row_comparisons if not r.overallMatch]
+            
             response = ComparisonResponse(
-                rowComparisons=row_comparisons,
+                rowComparisons=filtered_row_comparisons,
                 summary=summary,
                 totalRows=total_rows,
                 matchedRows=matched_rows,
@@ -492,8 +495,11 @@ async def compare_paysheets(request: ComparisonRequest):
         unmatched_rows = summary["unmatchedRows"]
         match_rate = summary["matchRate"]
         
+        # Filter to only show mismatched employees in response (statistics already calculated from full data)
+        filtered_row_comparisons = [r for r in row_comparisons if not r.overallMatch]
+        
         return ComparisonResponse(
-            rowComparisons=row_comparisons, 
+            rowComparisons=filtered_row_comparisons, 
             summary=summary,
             totalRows=total_rows,
             matchedRows=matched_rows,

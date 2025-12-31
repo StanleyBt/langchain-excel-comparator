@@ -25,10 +25,8 @@ AZURE_API_VERSION = os.getenv("AZURE_API_VERSION")
 # ============================================================================
 CONSTANT_HEADERS: List[str] = [
     "EMPLOYEE_NUMBER",
-    "INVOICE_AMOUNT",
-    "PREVIOUS_MONTH_CALENDAR_DAYS",
-    "BASE_VALUE",
-    "CONTRACTOR"
+    "NET_PAY",
+    "INVOICE_VALUE"
 ]
 
 # ============================================================================
@@ -42,16 +40,20 @@ CONSTANT_HEADERS: List[str] = [
 # - Headers containing ALL keywords in a list get that priority level
 # ============================================================================
 HEADER_MATCHING_PRIORITY: Dict[str, List[List[str]]] = {
-    "CONTRACTOR": [
-        ["contractor", "name"],      # Highest priority: contains both "contractor" and "name"
-        ["contractor"],              # Medium priority: just "contractor"
-        ["contractor", "id"],        # Lower priority: "contractor" and "id"
-        ["vendor", "name"]           # Alternative: "vendor" and "name"
-    ],
     "EMPLOYEE_NUMBER": [
         ["employee", "number"],      # Best: "employee" and "number"
         ["employee", "no"],          # Good: "employee" and "no"
         ["employee", "id"]           # Less preferred: "employee" and "id"
+    ],
+    "NET_PAY": [
+        ["net", "pay"],              # Best: "net" and "pay"
+        ["netpay"],                  # Alternative: "netpay"
+        ["net", "salary"]            # Alternative: "net" and "salary"
+    ],
+    "INVOICE_VALUE": [
+        ["invoice", "value"],        # Best: "invoice" and "value"
+        ["invoice", "amount"],       # Alternative: "invoice" and "amount"
+        ["invoicevalue"]             # Alternative: "invoicevalue"
     ]
     # Add more priority rules for other constant headers as needed
 }
@@ -66,10 +68,8 @@ HEADER_MATCHING_PRIORITY: Dict[str, List[List[str]]] = {
 # ============================================================================
 HEADER_VARIATIONS: Dict[str, List[str]] = {
     "EMPLOYEE_NUMBER": ["employee_number", "employee number", "employeenumber", "employee id", "employeeid", "employee no", "employee_no"],
-    "INVOICE_AMOUNT": ["invoice_amount", "invoice amount", "invoiceamount"],
-    "PREVIOUS_MONTH_CALENDAR_DAYS": [],
-    "BASE_VALUE": ["base_value", "base value", "basevalue"],
-    "CONTRACTOR": ["contractor", "contractor name", "contractorname", "contractor_id", "contractor id", "vendor", "vendor name"]
+    "NET_PAY": ["net_pay", "net pay", "netpay", "net salary", "netsalary", "net_amount", "net amount"],
+    "INVOICE_VALUE": ["invoice_value", "invoice value", "invoicevalue", "invoice_amount", "invoice amount", "invoiceamount"]
 }
 
 # ============================================================================
@@ -82,10 +82,8 @@ HEADER_VARIATIONS: Dict[str, List[str]] = {
 # ============================================================================
 AI_MATCHING_KEYWORDS: Dict[str, List[str]] = {
     "EMPLOYEE_NUMBER": ["employee", "emp", "id", "number", "no"],
-    "INVOICE_AMOUNT": ["invoice", "amount"],
-    "PREVIOUS_MONTH_CALENDAR_DAYS": ["previous", "month", "calendar", "days", "payable", "work"],
-    "BASE_VALUE": ["base", "value"],
-    "CONTRACTOR": ["contractor", "vendor"]
+    "NET_PAY": ["net", "pay", "salary", "amount", "netpay"],
+    "INVOICE_VALUE": ["invoice", "value", "amount"]
 }
 
 # ============================================================================
@@ -100,13 +98,46 @@ AI_MATCHING_KEYWORDS: Dict[str, List[str]] = {
 # - If vendor header contains any exclusion pattern, it won't be auto-matched
 # ============================================================================
 EXCLUDED_MATCHING_PATTERNS: Dict[str, List[str]] = {
-    "CONTRACTOR": [
-        "id",           # Exclude "contractor id", "contractor_id" - these are identifiers, not names
-        "number",       # Exclude "contractor number"
-        "code"          # Exclude "contractor code"
-    ],
     "EMPLOYEE_NUMBER": [
         "name"          # Exclude "employee name" - we want number/id, not name
+    ],
+    "NET_PAY": [
+        "gross",        # Exclude "gross pay" - we want net pay
+        "basic",        # Exclude "basic pay" - we want net pay
+        "total",        # Exclude "total pay", "total payable" - we want net pay (after deductions)
+        "payable"       # Exclude "total payable", "amount payable" - different from net pay
     ]
     # Add more exclusion patterns as needed
 }
+
+# ============================================================================
+# TEXT-ONLY COLUMNS CONFIGURATION
+# ============================================================================
+# Columns that should ALWAYS be treated as text, never as numbers.
+# This prevents numeric conversion issues (e.g., leading zeros lost, 
+# scientific notation, numeric tolerance applied).
+# 
+# These columns will be compared as exact text matches only.
+# 
+# Format: List of column name patterns (case-insensitive, will be normalized)
+# - Can use exact matches or partial patterns
+# - Employee numbers are included by default to preserve leading zeros
+# ============================================================================
+TEXT_ONLY_COLUMNS: List[str] = [
+    "EMPLOYEE_NUMBER",           # Always treat employee numbers as text
+    "employee_number",           # Lowercase variant
+    "employee number",           # Space-separated variant
+    "employeeid",                # No space variant
+    "employee_id",               # Underscore variant
+    "employee no",               # "no" variant
+    "employee_no",               # Underscore "no" variant
+    "CONTRACTOR",                # Always treat contractor names as text
+    "contractor",                # Lowercase variant  
+    "contractor name",           # Space-separated variant
+    "contractorname",            # No space variant
+    "vendor",                    # Alternative name
+    "vendor name",               # Alternative with space
+    "vendorname",                # Alternative no space
+    # Add more text-only columns as needed
+    # Examples: "CONTRACTOR_ID", "VENDOR_CODE", "REFERENCE_NUMBER", etc.
+]

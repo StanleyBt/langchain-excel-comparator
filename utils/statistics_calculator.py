@@ -61,12 +61,12 @@ def calculate_column_statistics(
         mismatched = total - matched
         match_rate = matched / total if total > 0 else 0.0
         
-        # Calculate numeric statistics
+        # Calculate numeric statistics (rounded to 2 decimal places)
         numeric_diffs = [cc.difference for cc in comparisons if cc.difference is not None]
-        total_diff = sum(numeric_diffs) if numeric_diffs else None
-        avg_diff = (sum(numeric_diffs) / len(numeric_diffs)) if numeric_diffs else None
-        max_diff = max(numeric_diffs) if numeric_diffs else None
-        min_diff = min(numeric_diffs) if numeric_diffs else None
+        total_diff = round(sum(numeric_diffs), 2) if numeric_diffs else None
+        avg_diff = round(sum(numeric_diffs) / len(numeric_diffs), 2) if numeric_diffs else None
+        max_diff = round(max(numeric_diffs), 2) if numeric_diffs else None
+        min_diff = round(min(numeric_diffs), 2) if numeric_diffs else None
         
         # Calculate vendor and system sums (for numeric columns only)
         # Skip text-only columns (e.g., Employee Number, Contractor)
@@ -99,10 +99,11 @@ def calculate_column_statistics(
                         pass
             
             # Only set sums if we have numeric values (indicates numeric column)
+            # Round to 2 decimal places for numeric columns
             if vendor_numeric_values:
-                vendor_sum = sum(vendor_numeric_values)
+                vendor_sum = round(sum(vendor_numeric_values), 2)
             if system_numeric_values:
-                system_sum = sum(system_numeric_values)
+                system_sum = round(sum(system_numeric_values), 2)
         
         # Get top mismatches with employee numbers
         mismatch_tuples = [(cc, emp_id) for cc, emp_id in comparison_tuples if not cc.isMatch]
@@ -113,18 +114,24 @@ def calculate_column_statistics(
                 employeeNumber=emp_id,
                 vendorValue=cc.vendorValue,
                 systemValue=cc.systemValue,
-                difference=cc.difference
+                difference=round(cc.difference, 2) if cc.difference is not None else None
             )
             for cc, emp_id in mismatch_tuples[:top_n]
         ]
         
-        # Determine if this is Employee Number column for headcount
+        # Determine if this is Employee Number/Head Count column
         col_name_lower = col_name.lower().strip()
         is_employee_number = (
             "employee" in col_name_lower and 
-            ("number" in col_name_lower or "no" in col_name_lower or "id" in col_name_lower)
+            ("number" in col_name_lower or "no" in col_name_lower or "id" in col_name_lower or "head count" in col_name_lower)
         )
         headcount = matched if is_employee_number else None
+        
+        # For Employee Head Count column, show count of employees instead of sum (as whole number)
+        if is_employee_number:
+            # Set counts to the number of employees (rows) - use integer, not float
+            vendor_sum = int(total)  # Count of employees (whole number)
+            system_sum = int(total)  # Count of employees (whole number, same for both vendor and system)
         
         column_stats.append(ColumnStatistic(
             columnName=col_name,

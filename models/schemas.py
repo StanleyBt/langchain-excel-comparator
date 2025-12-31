@@ -140,9 +140,19 @@ class ColumnStatistic(BaseModel):
     minDifference: Optional[float] = Field(None, description="Minimum difference (for numeric columns)")
     mismatchPercentage: float = Field(..., description="Percentage of mismatches")
     topMismatches: List[ColumnMismatchDetail] = Field(default_factory=list, description="Top mismatches for this column")
-    vendorPaysheetCount: Optional[float] = Field(None, description="Total sum of all vendor values for this column (numeric columns only)")
-    systemPaysheetCount: Optional[float] = Field(None, description="Total sum of all system values for this column (numeric columns only)")
+    vendorPaysheetCount: Optional[Union[int, float]] = Field(None, description="Total sum of all vendor values for this column (numeric columns only). For Employee Head Count, this is the count (integer).")
+    systemPaysheetCount: Optional[Union[int, float]] = Field(None, description="Total sum of all system values for this column (numeric columns only). For Employee Head Count, this is the count (integer).")
     headcount: Optional[int] = Field(None, description="Headcount/matched count (only for Employee Number column)")
+    
+    @field_validator('vendorPaysheetCount', 'systemPaysheetCount', mode='before')
+    @classmethod
+    def preserve_integer_type(cls, v):
+        """Preserve integer type for Employee Head Count (don't convert to float)"""
+        if v is not None:
+            # If it's a whole number (like 1.0), convert to int to preserve integer type in JSON
+            if isinstance(v, float) and v.is_integer():
+                return int(v)
+        return v
 
 
 class KeyFinding(BaseModel):

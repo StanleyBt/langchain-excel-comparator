@@ -308,7 +308,7 @@ def compare_rows(
         emp_num_comp = compare_column_values(
             str(emp_id),
             str(emp_id),
-            "Employee Number"
+            "Employee Head Count"
         )
         column_comparisons.append(emp_num_comp)
         

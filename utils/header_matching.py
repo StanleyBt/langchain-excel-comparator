@@ -5,18 +5,27 @@ import re
 from typing import Dict, List, Tuple, Optional
 from langchain_openai import AzureChatOpenAI
 from langchain.schema import HumanMessage
-from config import AZURE_DEPLOYMENT_NAME, AZURE_ENDPOINT, AZURE_API_KEY, AZURE_API_VERSION
-from config import CONSTANT_HEADERS, HEADER_MATCHING_PRIORITY, HEADER_VARIATIONS, AI_MATCHING_KEYWORDS
+from config import (
+    AZURE_DEPLOYMENT_NAME, AZURE_ENDPOINT, AZURE_API_KEY, AZURE_API_VERSION,
+    AZURE_OPENAI_TIMEOUT, AZURE_OPENAI_MAX_RETRIES
+)
+from config import CONSTANT_HEADERS, HEADER_MATCHING_PRIORITY, HEADER_VARIATIONS
+import time
+from utils.normalization import normalize_header_name
+from utils.logger import get_logger
+
+logger = get_logger("header_matching")
 
 # Removed Streamlit-specific functions: find_header_row, detect_header_row, run_header_mapping
 # These were only used by the Streamlit UI app which has been removed
 
+# Alias for backward compatibility
 def normalize_header_for_matching(header: str) -> str:
     """
     Normalize header name for matching comparison.
-    Removes spaces, converts to lowercase, handles common variations.
+    Uses centralized normalization function.
     """
-    return str(header).strip().lower().replace(" ", "_").replace("-", "_").replace(".", "")
+    return normalize_header_name(header, for_matching=True)
 
 
 def match_headers_ai(
@@ -45,6 +54,7 @@ def match_headers_ai(
     
     # Get normalized headers (keep original for return)
     vendor_headers_original = [str(col) for col in df_vendor.columns]
+    # Headers are already normalized to lowercase in data_processor
     vendor_headers = [str(col).strip().lower() for col in df_vendor.columns]
     system_headers = [str(col).strip().lower() for col in df_system.columns]
     
@@ -64,13 +74,14 @@ def match_headers_ai(
         # Get variations ordered by priority
         variations = constant_mapping_variations.get(const_header, [const_normalized])
         
-        # Find ALL potential vendor headers that could match (with priority)
-        potential_matches = []  # List of (vendor_header, priority_score)
+        # Phase 1: Create hints from variations (suggestions, not filters)
+        # These hints help AI prioritize, but AI will analyze ALL headers
+        high_confidence_hints = []  # List of (vendor_header, priority_score)
         
         for vendor_header in vendor_headers:
             vendor_norm = normalize_header_for_matching(vendor_header)
             
-            # Check if vendor header matches any variation
+            # Check if vendor header matches any variation (for hint generation)
             matches_variation = False
             for variation in variations:
                 if variation in vendor_norm or vendor_norm in variation:
@@ -95,27 +106,33 @@ def match_headers_ai(
                             priority_score = priority
                             break
                 
-                potential_matches.append((vendor_header, priority_score))
+                high_confidence_hints.append((vendor_header, priority_score))
         
-        # Sort by priority (lower number = better match)
-        potential_matches.sort(key=lambda x: x[1])
+        # Sort hints by priority (lower number = better match)
+        high_confidence_hints.sort(key=lambda x: x[1])
         
-        # Use AI to validate and select the best match when we have candidates
-        # AI can distinguish semantic differences (e.g., "contractor name" vs "contractor id")
+        # Phase 2: Always call AI with ALL headers, passing hints as suggestions
+        # AI will analyze all headers semantically and make the final decision
         ai_was_called = False
         ai_explicitly_rejected = False
         
-        if potential_matches:
-            # Get top candidates (same priority level or close) - include at least top 3 or all if fewer
-            top_priority = potential_matches[0][1]
-            top_candidates = [vh for vh, pri in potential_matches if pri <= top_priority + 1]
-            
-            # If we have candidates, use AI to validate semantic correctness
-            # This ensures even single candidates are validated (e.g., "contractor id" will be rejected)
+        # Collect ALL vendor headers that haven't been matched yet
+        all_vendor_headers = [vh for vh in vendor_headers if vh not in matched_headers]
+        all_system_headers = list(system_headers)
+        
+        # Extract top hints (up to 5) as suggestions for AI
+        hint_list = [h[0] for h in high_confidence_hints[:5]] if high_confidence_hints else None
+        
+        # Always call AI with all headers (not just filtered candidates)
+        if all_vendor_headers and all_system_headers:
             try:
                 ai_was_called = True
                 ai_selected = _ai_semantic_matching_for_constant_header(
-                    const_header, top_candidates, system_headers, variations
+                    const_header, 
+                    all_vendor_headers,  # ALL headers, not filtered
+                    all_system_headers,  # ALL headers
+                    variations,
+                    hints=hint_list  # Pass hints as suggestions
                 )
                 if ai_selected:
                     for vendor_h, system_h in ai_selected.items():
@@ -128,16 +145,21 @@ def match_headers_ai(
                     # AI returned empty dict - it explicitly rejected all candidates
                     ai_explicitly_rejected = True
             except Exception as e:
-                print(f"Warning: AI validation failed, falling back to priority-based matching: {e}")
+                error_str = str(e).lower()
+                is_timeout = "timeout" in error_str or "timed out" in error_str
+                
+                if is_timeout:
+                    print(f"⚠️  Warning: AI request timed out after {AZURE_OPENAI_TIMEOUT}s (with {AZURE_OPENAI_MAX_RETRIES} retries). Falling back to priority-based matching.")
+                else:
+                    print(f"⚠️  Warning: AI validation failed, falling back to priority-based matching: {e}")
                 # AI service failed, but we'll still try fallback
         
-        # Only fall back to direct matching if:
-        # 1. AI service failed (exception) OR
-        # 2. AI was never called (no potential matches found)
+        # Phase 3: Fallback direct matching - Only if AI service failed (exception)
         # DO NOT fall back if AI explicitly rejected candidates (empty dict)
-        if not matched and not ai_explicitly_rejected:
-            # Try to match with system headers, starting with best vendor header match
-            for vendor_header, _ in potential_matches:
+        if not matched and not ai_explicitly_rejected and ai_was_called:
+            # AI was called but failed - try direct matching with hints as fallback
+            # Try to match with system headers, starting with best vendor header from hints
+            for vendor_header, _ in high_confidence_hints:
                 # Check if this vendor header is already matched to a different constant header
                 if vendor_header in matched_headers:
                     continue
@@ -156,31 +178,28 @@ def match_headers_ai(
                 if matched:
                     break
         
-        # If not found with exact variations, use AI to intelligently match
-        # AI can distinguish between semantically different headers (e.g., "contractor id" vs "contractor name")
-        if not matched:
-            # Collect all vendor headers that could potentially match (based on keywords)
+        # Phase 4: Fallback - Only needed if Phase 2 AI failed or was not called
+        # Since Phase 2 now always calls AI with all headers, this phase is rarely needed
+        # But keep it as a safety net for edge cases
+        if not matched and not ai_was_called:
+            # This should rarely happen now, but keep as fallback
+            # Collect ALL vendor headers that haven't been matched yet
             potential_vendor = []
             for vendor_header in vendor_headers:
-                vendor_norm = normalize_header_for_matching(vendor_header)
-                # Check if it's somewhat related (contains key words from config)
-                words = AI_MATCHING_KEYWORDS.get(const_header, [])
-                if any(word in vendor_norm for word in words):
+                # Skip if already matched to a different constant header
+                if vendor_header not in matched_headers:
                     potential_vendor.append(vendor_header)
             
-            # Find potential system headers
-            potential_system = []
-            for system_header in system_headers:
-                system_norm = normalize_header_for_matching(system_header)
-                words = AI_MATCHING_KEYWORDS.get(const_header, [])
-                if any(word in system_norm for word in words):
-                    potential_system.append(system_header)
+            # Collect ALL system headers
+            potential_system = list(system_headers)
             
-            # Use AI to intelligently match - AI will distinguish semantic differences
+            # Use AI to autonomously analyze and match - AI will find matches based on semantic understanding
+            # Pass hints if available
+            hint_list = [h[0] for h in high_confidence_hints[:5]] if high_confidence_hints else None
             if potential_vendor and potential_system:
                 try:
                     ai_matches = _ai_semantic_matching_for_constant_header(
-                        const_header, potential_vendor, potential_system, variations
+                        const_header, potential_vendor, potential_system, variations, hints=hint_list
                     )
                     # Use AI's match if it found one
                     if ai_matches:
@@ -192,7 +211,19 @@ def match_headers_ai(
                                 matched = True
                                 break
                 except Exception as e:
-                    print(f"Warning: AI semantic matching failed for {const_header}: {e}")
+                    error_str = str(e).lower()
+                    is_timeout = "timeout" in error_str or "timed out" in error_str
+                    
+                    if is_timeout:
+                        logger.warning(
+                            f"AI request timed out for constant header",
+                            extra={"timeout": AZURE_OPENAI_TIMEOUT, "retries": AZURE_OPENAI_MAX_RETRIES, "constant_header": const_header}
+                        )
+                    else:
+                        logger.warning(
+                            f"AI semantic matching failed for constant header",
+                            extra={"error": str(e)[:100], "constant_header": const_header}  # Truncate error message
+                        )
         
         if not matched:
             constant_headers_status[const_header] = False
@@ -254,7 +285,8 @@ def _ai_semantic_matching_for_constant_header(
     const_header: str,
     potential_vendor: List[str],
     potential_system: List[str],
-    expected_variations: List[str]
+    expected_variations: List[str],
+    hints: Optional[List[str]] = None
 ) -> Dict[str, str]:
     """
     Use AI to semantically match headers for a specific constant header.
@@ -263,9 +295,10 @@ def _ai_semantic_matching_for_constant_header(
     
     Args:
         const_header: The constant header being matched (e.g., "CONTRACTOR")
-        potential_vendor: List of vendor headers that might match
-        potential_system: List of system headers that might match
+        potential_vendor: List of ALL vendor headers to analyze (not filtered)
+        potential_system: List of ALL system headers to analyze (not filtered)
         expected_variations: List of expected variations for this constant header
+        hints: Optional list of high-confidence header hints from Phase 1 (suggestions, not requirements)
         
     Returns:
         Dictionary mapping vendor_header -> system_header (only if AI finds a good semantic match)
@@ -278,15 +311,26 @@ def _ai_semantic_matching_for_constant_header(
         temperature=0,
         azure_endpoint=AZURE_ENDPOINT,
         api_key=AZURE_API_KEY,
-        api_version=AZURE_API_VERSION
+        api_version=AZURE_API_VERSION,
+        timeout=AZURE_OPENAI_TIMEOUT,
+        max_retries=0  # We handle retries manually with exponential backoff
     )
     
     # Get semantic context for the constant header
     semantic_context = _get_semantic_context_for_header(const_header)
     
+    # Format hints for prompt
+    hints_text = ", ".join(hints) if hints else "None - analyze all headers independently"
+    
     # Create a smart prompt that helps AI understand semantic differences
     prompt = f"""
-You are a data assistant matching column headers for payroll/paysheet data.
+You are an intelligent data assistant matching column headers for payroll/paysheet data.
+You have access to ALL headers and must autonomously find the best semantic match.
+
+CONTEXT:
+- System paysheet is the SOURCE OF TRUTH with standard column names (constant headers)
+- Vendor paysheets come from different sources with varying naming conventions
+- Your task: Match vendor columns to system's constant headers semantically
 
 CONSTANT HEADER TO MATCH: "{const_header}"
 
@@ -294,81 +338,68 @@ CONSTANT HEADER TO MATCH: "{const_header}"
 
 Expected variations for this header: {expected_variations}
 
-Vendor headers that might match:
+HIGH-CONFIDENCE HINTS (from Phase 1 - use as suggestions, not requirements):
+These headers matched hardcoded variations and are likely candidates:
+{hints_text}
+
+ALL AVAILABLE VENDOR HEADERS (analyze ALL of these, not just hints):
 {potential_vendor}
 
-System headers that might match:
+ALL AVAILABLE SYSTEM HEADERS (analyze ALL of these):
 {potential_system}
 
-CRITICAL SEMANTIC MATCHING RULES:
-1. Match vendor headers to system headers ONLY if they represent the SAME REAL-WORLD CONCEPT
-2. Understand the BUSINESS MEANING of "{const_header}" - not just keywords
-3. STRICTLY REJECT semantically incorrect matches based on these patterns:
+MATCHING STRATEGY:
+1. Consider hints as likely candidates, but analyze ALL headers independently
+2. Understand business meaning, not just keywords
+3. System headers are standard - vendor headers may vary significantly
+4. Pick the BEST semantic match, even if not in hints
+5. Reject matches that don't make business sense, even if keywords overlap
 
-   TYPE MISMATCHES (REJECT these):
-   - NAME vs IDENTIFIER: If constant header expects a NAME (text like "John Doe", "ABC Company"), 
-     REJECT headers with: "id", "number", "code", "identifier", "ref", "reference"
-     ✅ ACCEPT: "name", "title", "label", "description"
-     ❌ REJECT: "id", "number", "code", "identifier"
-   
-   - IDENTIFIER vs NAME: If constant header expects an ID/NUMBER (like "EMP001", "12345"),
-     REJECT headers with: "name", "title", "label", "description"
-     ✅ ACCEPT: "id", "number", "no", "code", "identifier"
-     ❌ REJECT: "name", "title", "label"
-   
-   - AMOUNT vs COUNT: If constant header expects an AMOUNT (monetary value),
-     REJECT headers with: "count", "quantity", "qty", "number of", "total items"
-     ✅ ACCEPT: "amount", "value", "price", "cost"
-     ❌ REJECT: "count", "quantity", "qty"
-   
-   - NET vs GROSS vs TOTAL vs PAYABLE: Understand the payroll context:
-     * NET_PAY = Employee's take-home pay AFTER all deductions (taxes, insurance, etc.)
-     * GROSS_PAY = Employee's pay BEFORE deductions
-     * TOTAL_PAYABLE = Total amount to be paid (could be gross, could include other components)
-     * BASIC_PAY = Base salary component (before allowances/deductions)
-     * If constant header is NET_PAY, REJECT: "gross", "total payable", "basic", "total pay"
-     * If constant header is NET_PAY, ACCEPT: "net pay", "netpay", "net salary", "take home"
-     * Understand: "total_payable" ≠ "net_pay" (total payable is what needs to be paid, net pay is after deductions)
-   
-   - PERCENTAGE vs DECIMAL: If constant header expects PERCENTAGE,
-     REJECT headers with: "decimal", "ratio", "fraction" (unless they also say "percent")
-     ✅ ACCEPT: "percentage", "percent", "%", "rate"
-     ❌ REJECT: "decimal", "ratio" (without percent context)
-   
-   - DATE vs DATE_STRING: If constant header expects a DATE,
-     REJECT headers with: "date string", "date text", "formatted date" (unless it's the only option)
-     ✅ ACCEPT: "date", "dob", "doj", "timestamp"
-     ⚠️ ACCEPT "date string" only if no better match exists
-
-4. GENERAL RULES:
-   - If vendor header contains "id"/"number"/"code" but constant header needs "name" → REJECT
-   - If vendor header contains "name" but constant header needs "id"/"number" → REJECT
-   - If vendor header contains "count" but constant header needs "amount" → REJECT
-   - If vendor header contains "amount" but constant header needs "count" → REJECT
-   - Only return matches that make semantic sense
-   - If no good semantic match exists, return an empty JSON object {{}}
-
-5. REAL-WORLD CONTEXT AWARENESS:
-   - Think about what this column represents in actual payroll/paysheet systems
-   - Consider business logic: Would these two columns have the same value in real payroll?
-   - If the meanings are different, even if keywords overlap, REJECT the match
-   - When in doubt, REJECT - it's better to require manual mapping than create incorrect matches
-
-6. PAYROLL-SPECIFIC UNDERSTANDING:
-   - Employee Number: Unique identifier (text, may have leading zeros) - NOT employee name
-   - Net Pay: Take-home amount after ALL deductions - NOT gross, NOT total payable, NOT basic
-   - Invoice Value: Amount on invoice/bill - NOT invoice count, NOT invoice number
-   - Understand that payroll terms have specific meanings - don't match based on partial keyword overlap
+CORE PRINCIPLES:
+1. Match ONLY if vendor and system headers represent the SAME business concept
+2. Use the BUSINESS MEANING above - it tells you what to accept and reject
+3. When in doubt, REJECT - return {{}} (empty object)
+4. Better to require manual mapping than create incorrect matches
 
 ⚠️ Return output as JSON only, in this format:
 {{"vendor_header": "system_header"}} or {{}} if no good match
 
-IMPORTANT: If you're unsure whether two headers represent the same concept, return {{}} (empty object).
-It's better to require manual mapping than to create an incorrect automatic match.
+IMPORTANT: The semantic context above already specifies what to accept/reject for "{const_header}".
+Follow those guidelines. If you're unsure, return {{}} (empty object).
 """
     
-    response = llm.invoke([HumanMessage(content=prompt)])
-    raw_output = response.content
+    # Retry logic with exponential backoff for timeout errors
+    last_error = None
+    for attempt in range(AZURE_OPENAI_MAX_RETRIES + 1):
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            raw_output = response.content
+            break  # Success, exit retry loop
+        except Exception as e:
+            last_error = e
+            error_str = str(e).lower()
+            is_timeout = "timeout" in error_str or "timed out" in error_str or "time" in error_str
+            
+            if attempt < AZURE_OPENAI_MAX_RETRIES and is_timeout:
+                # Exponential backoff: wait 1s, 2s, 4s, etc.
+                wait_time = 2 ** attempt
+                logger.info(
+                    f"AI request timeout, retrying",
+                    extra={
+                        "attempt": attempt + 1,
+                        "max_retries": AZURE_OPENAI_MAX_RETRIES + 1,
+                        "wait_time": wait_time,
+                        "constant_header": const_header
+                    }
+                )
+                time.sleep(wait_time)
+            else:
+                # Last attempt or non-timeout error - raise it
+                raise
+    
+    # If we get here without breaking, it means all retries failed
+    if last_error:
+        raise last_error
     
     try:
         semantic_matches = json.loads(raw_output)
@@ -386,63 +417,3 @@ It's better to require manual mapping than to create an incorrect automatic matc
     }
 
 
-def _ai_semantic_matching(unmatched_vendor: List[str], unmatched_system: List[str]) -> Dict[str, str]:
-    """
-    Use AI to semantically match unmatched headers.
-    
-    Args:
-        unmatched_vendor: List of vendor headers that couldn't be matched
-        unmatched_system: List of system headers available for matching
-        
-    Returns:
-        Dictionary mapping vendor_header -> system_header
-    """
-    if not unmatched_vendor or not unmatched_system:
-        return {}
-    
-    llm = AzureChatOpenAI(
-        deployment_name=AZURE_DEPLOYMENT_NAME,
-        temperature=0,
-        azure_endpoint=AZURE_ENDPOINT,
-        api_key=AZURE_API_KEY,
-        api_version=AZURE_API_VERSION
-    )
-    
-    prompt = f"""
-You are a data assistant comparing column headers between two paysheet systems.
-
-These are headers from a Vendor Paysheet that had no exact match:
-{unmatched_vendor}
-
-And these are remaining headers from the System Paysheet:
-{unmatched_system}
-
-Your task:
-- Match each Vendor header to the most semantically similar System header.
-- If no good match exists, set the value to null.
-- Use domain knowledge of payroll systems. For example:
-  - "employee id" could be "employee number", "cems employee id", or "blue tree id".
-  - "gross salary" could be "fixed gross" or "ctc".
-  - "contractor name" could be "contractor" or "vendor".
-
-⚠️ Return output as JSON only, in this format:
-{{"vendor_header_1": "system_header_1", "vendor_header_2": "system_header_2", ...}}
-"""
-    
-    response = llm.invoke([HumanMessage(content=prompt)])
-    raw_output = response.content
-    
-    try:
-        semantic_matches = json.loads(raw_output)
-    except json.JSONDecodeError:
-        match = re.search(r"{.*}", raw_output, re.DOTALL)
-        if match:
-            semantic_matches = json.loads(match.group())
-        else:
-            raise ValueError("❌ GPT did not return valid JSON or parsable output.")
-    
-    # Filter out null/None values and "no match" strings
-    return {
-        k: v for k, v in semantic_matches.items() 
-        if v and str(v).lower() not in ["null", "none", "no match", ""]
-    }

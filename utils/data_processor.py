@@ -1,7 +1,8 @@
 # utils/data_processor.py
 import pandas as pd
-from typing import List, Dict, Any, Optional
-from models.schemas import SystemDataItem, VendorPaysheetItem
+from typing import List, Dict, Any
+from models.schemas import SystemDataItem
+from utils.normalization import normalize_dataframe_columns
 
 
 def system_json_to_dataframe(system_data: List[SystemDataItem]) -> pd.DataFrame:
@@ -27,8 +28,8 @@ def system_json_to_dataframe(system_data: List[SystemDataItem]) -> pd.DataFrame:
     
     df = pd.DataFrame(rows)
     
-    # Normalize column names: strip whitespace, convert to lowercase
-    df.columns = [str(col).strip().lower() for col in df.columns]
+    # Normalize column names using centralized function
+    normalize_dataframe_columns(df)
     
     return df
 
@@ -47,8 +48,8 @@ def vendor_json_to_dataframe(vendor_data: List[Dict[str, Any]]) -> pd.DataFrame:
     """
     df = pd.DataFrame(vendor_data)
     
-    # Normalize column names: strip whitespace, convert to lowercase
-    df.columns = [str(col).strip().lower() for col in df.columns]
+    # Normalize column names using centralized function
+    normalize_dataframe_columns(df)
     
     return df
 

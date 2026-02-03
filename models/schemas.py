@@ -1,5 +1,5 @@
 # models/schemas.py
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Dict, Optional, Any, Union
 from config import CONSTANT_HEADERS
 
@@ -18,21 +18,35 @@ class SystemDataItem(BaseModel):
         return str(v) if v is not None else None
 
 
-class VendorPaysheetItem(BaseModel):
-    """Vendor paysheet data item - flat structure"""
-    # Using Dict to allow all fields dynamically
-    # Key fields we know: EMPLOYEE NUMBER, INVOICE_AMOUNT, DAYS_PAYABLE, BASE_VALUE, Contractor Name
-    class Config:
-        extra = "allow"  # Allow extra fields
-
+# Removed VendorPaysheetItem - not used (vendor data uses Dict[str, Any] directly)
 
 class MatchedVendorDataItem(BaseModel):
-    """Matched vendor data item from frontend"""
+    """Matched vendor data item from frontend
+    
+    Supports both single and multiple vendor columns:
+    - Single column: Use mappedVendorHeader (backward compatible)
+    - Multiple columns: Use mappedVendorHeaders (sum will be calculated)
+    """
     systemColumn: str = Field(..., description="System column name")
-    mappedVendorHeader: str = Field(..., description="Vendor header name that maps to system column")
-    status: str = Field(..., description="Status of the match")
-    issue: str = Field(..., description="Any issues detected")
-    matchType: str = Field(..., description="Type of match: 'exact', 'semantic', or 'manual'")
+    mappedVendorHeader: Optional[str] = Field(None, description="Vendor header name (single column - backward compatible)")
+    mappedVendorHeaders: Optional[List[str]] = Field(None, description="Vendor header names (multiple columns - will be summed)")
+    status: Optional[str] = Field(None, description="Status of the match")
+    issue: Optional[str] = Field(None, description="Any issues detected")
+    matchType: Optional[str] = Field(None, description="Type of match: 'exact', 'semantic', or 'manual'")
+    
+    @model_validator(mode='after')
+    def validate_vendor_headers(self):
+        """Ensure either mappedVendorHeader or mappedVendorHeaders is provided, not both"""
+        mapped_single = self.mappedVendorHeader
+        mapped_multiple = self.mappedVendorHeaders
+        
+        if mapped_multiple and mapped_single:
+            raise ValueError("Cannot use both mappedVendorHeader and mappedVendorHeaders. Use one or the other.")
+        if not mapped_multiple and not mapped_single:
+            raise ValueError("Must provide either mappedVendorHeader (single) or mappedVendorHeaders (multiple)")
+        if mapped_multiple and len(mapped_multiple) == 0:
+            raise ValueError("mappedVendorHeaders cannot be empty. Provide at least one column.")
+        return self
 
 
 class HeaderMatchingRequest(BaseModel):
@@ -48,7 +62,6 @@ class HeaderMatchingRequest(BaseModel):
     vendorPaysheetData: List[Dict[str, Any]] = Field(..., description="Vendor paysheet data array (flat structure)")
     headerCheck: Optional[bool] = Field(default=True, description="If true, perform header matching. If false, perform comparison using matchedVendorData")
     matchedVendorData: Optional[List[MatchedVendorDataItem]] = Field(None, description="Matched vendor data for comparison mode. Required when headerCheck is false")
-    contractorFilter: Optional[str] = Field(None, description="Optional contractor name to filter by (for comparison mode)")
 
 
 class HeaderMatch(BaseModel):
@@ -104,19 +117,8 @@ class RowComparisonResult(BaseModel):
     rowStatus: str = Field(..., description="Status: 'matched', 'only_in_vendor', 'only_in_system'")
 
 
-class ComparisonRequest(BaseModel):
-    """Request model for comparison endpoint"""
-    organizationId: Optional[int] = None
-    filesCount: Optional[int] = None
-    month: Optional[int] = None
-    processingStage: Optional[str] = None
-    year: Optional[int] = None
-    compensationId: Optional[int] = None
-    paysheetComparisionId: Optional[int] = None
-    systemData: List[SystemDataItem] = Field(..., description="System paysheet data array")
-    vendorPaysheetData: List[Dict[str, Any]] = Field(..., description="Vendor paysheet data array")
-    headerMapping: Dict[str, str] = Field(..., description="Complete header mapping: {vendorHeader: systemHeader}")
-    contractorFilter: Optional[str] = Field(None, description="Optional contractor name to filter by")
+# Removed ComparisonRequest - endpoint /api/v1/compare was removed
+# Comparison functionality is available via /api/v1/headers/match with headerCheck=false
 
 
 class ColumnMismatchDetail(BaseModel):

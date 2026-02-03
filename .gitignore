@@ -15,6 +15,10 @@ venv/
 request_logs/*.json
 request_logs/*.txt
 
+# Application logs
+*.log
+logs/
+
 # Data and output folders
 data/
 output/

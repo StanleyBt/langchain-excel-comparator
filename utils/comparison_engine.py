@@ -4,6 +4,10 @@ import re
 from typing import Dict, List, Optional, Any, Tuple
 from models.schemas import RowComparisonResult, ColumnComparison
 from config import TEXT_ONLY_COLUMNS
+from utils.normalization import normalize_text_value, normalize_column_name_for_check, normalize_for_comparison
+from utils.logger import get_logger
+
+logger = get_logger("comparison_engine")
 
 
 def format_column_name(column_name: str) -> str:
@@ -46,33 +50,9 @@ def format_column_name(column_name: str) -> str:
     return ' '.join(formatted_words)
 
 
-def normalize_text(val: Any) -> str:
-    """Normalize text for comparison"""
-    if val is None or pd.isna(val):
-        return ""
-    # Convert to string, strip whitespace, normalize spaces
-    text = str(val).strip() 
-    if not text:
-        return ""
-    return " ".join(text.lower().split())
-
-
-def normalize_column_name_for_check(column_name: str) -> str:
-    """
-    Normalize column name for checking against TEXT_ONLY_COLUMNS list.
-    Converts to lowercase, removes spaces/underscores for flexible matching.
-    
-    Args:
-        column_name: Column name to normalize
-        
-    Returns:
-        Normalized column name for comparison
-    """
-    if not column_name:
-        return ""
-    # Convert to lowercase, replace spaces/underscores with nothing, strip
-    normalized = str(column_name).strip().lower().replace(" ", "").replace("_", "")
-    return normalized
+# Use centralized normalization functions
+# normalize_text -> normalize_text_value (from utils.normalization)
+# normalize_column_name_for_check -> normalize_column_name_for_check (from utils.normalization)
 
 
 def is_text_only_column(column_name: str) -> bool:
@@ -130,8 +110,8 @@ def is_numeric_match(val1: Any, val2: Any, tolerance: float = 2.00) -> Tuple[boo
 
 def is_text_match(val1: Any, val2: Any) -> bool:
     """Check if two text values match (normalized)"""
-    norm1 = normalize_text(val1)
-    norm2 = normalize_text(val2)
+    norm1 = normalize_text_value(val1)
+    norm2 = normalize_text_value(val2)
     # Both empty/null are considered matching
     if not norm1 and not norm2:
         return True
@@ -219,7 +199,7 @@ def compare_column_values(
 def compare_rows(
     df_vendor: pd.DataFrame,
     df_system: pd.DataFrame,
-    header_mapping: Dict[str, str],
+    header_mapping: Dict[Any, str],  # Supports both str (single) and tuple (multiple) keys
     employee_number_vendor_col: Optional[str] = None,
     employee_number_system_col: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -245,8 +225,8 @@ def compare_rows(
     # Auto-detect employee number columns if not provided
     if not employee_number_vendor_col:
         for col in df_vendor.columns:
-            col_lower = str(col).lower().replace(" ", "_")
-            if "employee" in col_lower and ("number" in col_lower or "id" in col_lower):
+            col_normalized = normalize_for_comparison(col)
+            if "employee" in col_normalized and ("number" in col_normalized or "id" in col_normalized):
                 employee_number_vendor_col = col
                 break
     
@@ -256,8 +236,8 @@ def compare_rows(
             employee_number_system_col = header_mapping[employee_number_vendor_col]
         else:
             for col in df_system.columns:
-                col_lower = str(col).lower().replace(" ", "_")
-                if "employee" in col_lower and ("number" in col_lower or "id" in col_lower):
+                col_normalized = normalize_for_comparison(col)
+                if "employee" in col_normalized and ("number" in col_normalized or "id" in col_normalized):
                     employee_number_system_col = col
                     break
     
@@ -277,8 +257,15 @@ def compare_rows(
     only_in_system = system_emp_ids - vendor_emp_ids
     
     results = []
-    # Log employee matching summary
-    print(f"📊 Employee Matching: {len(matched_emp_ids)} matched, {len(only_in_vendor)} only in vendor, {len(only_in_system)} only in system")
+    # Log employee matching summary (without sensitive employee IDs)
+    logger.info(
+        f"Employee matching: {len(matched_emp_ids)} matched, {len(only_in_vendor)} only in vendor, {len(only_in_system)} only in system",
+        extra={
+            "matched_count": len(matched_emp_ids),
+            "only_in_vendor_count": len(only_in_vendor),
+            "only_in_system_count": len(only_in_system)
+        }
+    )
     
     # Show detailed debug for first 3 employees only, or if there are mismatches
     show_detailed_debug = len(matched_emp_ids) <= 3
@@ -290,9 +277,15 @@ def compare_rows(
         system_rows = df_system[df_system[employee_number_system_col] == emp_id]
         
         if len(vendor_rows) > 1:
-            print(f"⚠️  WARNING: Employee {emp_id} has {len(vendor_rows)} rows in vendor data! Using first row.")
+            logger.warning(
+                f"Employee has {len(vendor_rows)} rows in vendor data, using first row",
+                extra={"row_count": len(vendor_rows)}  # Don't log employee ID
+            )
         if len(system_rows) > 1:
-            print(f"⚠️  WARNING: Employee {emp_id} has {len(system_rows)} rows in system data! Using first row.")
+            logger.warning(
+                f"Employee has {len(system_rows)} rows in system data, using first row",
+                extra={"row_count": len(system_rows)}  # Don't log employee ID
+            )
         
         vendor_row = vendor_rows.iloc[0]
         system_row = system_rows.iloc[0]
@@ -313,39 +306,87 @@ def compare_rows(
         column_comparisons.append(emp_num_comp)
         
         # Compare each mapped column
-        for vendor_col, system_col in header_mapping.items():
-            # Skip employee number column if it's in the mapping (already added manually)
-            # Normalize column names for comparison
-            vendor_col_normalized = str(vendor_col).strip().lower().replace(" ", "_")
-            system_col_normalized = str(system_col).strip().lower().replace(" ", "_")
-            emp_vendor_normalized = str(employee_number_vendor_col).strip().lower().replace(" ", "_")
-            emp_system_normalized = str(employee_number_system_col).strip().lower().replace(" ", "_")
+        for vendor_col_key, system_col in header_mapping.items():
+            # Handle both single column (str) and multiple columns (tuple)
+            is_multi_column = isinstance(vendor_col_key, tuple)
             
-            if (vendor_col_normalized == emp_vendor_normalized or 
-                system_col_normalized == emp_system_normalized):
+            if is_multi_column:
+                # Multiple vendor columns - sum them
+                vendor_cols = list(vendor_col_key)
+                vendor_val = None
+                vendor_values = []
+                
+                # Sum all vendor columns
+                for col in vendor_cols:
+                    if col in df_vendor.columns and col in vendor_row.index:
+                        val = vendor_row[col]
+                        if val is not None and not pd.isna(val):
+                            try:
+                                vendor_values.append(float(val))
+                            except (ValueError, TypeError):
+                                pass
+                
+                if vendor_values:
+                    vendor_val = sum(vendor_values)
+                else:
+                    vendor_val = None
+                
+                # Check if any vendor columns exist
+                vendor_cols_exist = any(col in df_vendor.columns for col in vendor_cols)
+            else:
+                # Single vendor column (backward compatible)
+                vendor_col = vendor_col_key
+                vendor_cols = [vendor_col]
+                vendor_cols_exist = vendor_col in df_vendor.columns
+                
+                if vendor_cols_exist and vendor_col in vendor_row.index:
+                    vendor_val = vendor_row[vendor_col]
+                else:
+                    vendor_val = None
+            
+            # Skip employee number column if it's in the mapping (already added manually)
+            system_col_normalized = normalize_for_comparison(system_col)
+            emp_vendor_normalized = normalize_for_comparison(employee_number_vendor_col)
+            emp_system_normalized = normalize_for_comparison(employee_number_system_col)
+            
+            # Check if any vendor column matches employee number (for multi-column case)
+            if is_multi_column:
+                vendor_cols_normalized = [normalize_for_comparison(col) for col in vendor_cols]
+                skip_employee = any(vc_norm == emp_vendor_normalized for vc_norm in vendor_cols_normalized)
+            else:
+                vendor_col_normalized = normalize_for_comparison(vendor_col_key)
+                skip_employee = vendor_col_normalized == emp_vendor_normalized
+            
+            if (skip_employee or system_col_normalized == emp_system_normalized):
                 continue
             
-            if vendor_col in df_vendor.columns and system_col in df_system.columns:
-                # Get values using .get() with explicit column access
-                vendor_val = vendor_row[vendor_col] if vendor_col in vendor_row.index else None
-                system_val = system_row[system_col] if system_col in system_row.index else None
-                
-                # Use clean, formatted system column name for display
-                display_col_name = format_column_name(system_col)
-                
-                # Check if columns exist in DataFrames (warn only)
-                if vendor_col not in df_vendor.columns:
-                    print(f"⚠️  Warning: Vendor column '{vendor_col}' not found")
+            # Get system value
+            if system_col in df_system.columns and system_col in system_row.index:
+                system_val = system_row[system_col]
+            else:
+                system_val = None
                 if system_col not in df_system.columns:
-                    print(f"⚠️  Warning: System column '{system_col}' not found")
-                
-                col_comp = compare_column_values(vendor_val, system_val, display_col_name)
-                
-                if not col_comp.isMatch:
-                    all_match = False
-                    employee_mismatches.append(f"{display_col_name}: vendor={vendor_val}, system={system_val}, diff={col_comp.difference}")
-                
-                column_comparisons.append(col_comp)
+                    logger.warning(f"System column not found", extra={"column": "[MASKED]"})
+            
+            # Check if vendor columns exist
+            if not vendor_cols_exist:
+                missing_cols = [col for col in vendor_cols if col not in df_vendor.columns]
+                if missing_cols:
+                    logger.warning(f"Vendor column(s) not found", extra={"column_count": len(missing_cols)})
+                continue
+            
+            # Use clean, formatted system column name for display
+            display_col_name = format_column_name(system_col)
+            
+            # Compare values
+            col_comp = compare_column_values(vendor_val, system_val, display_col_name)
+            
+            if not col_comp.isMatch:
+                all_match = False
+                # Don't log actual values (sensitive data) - just track mismatch
+                employee_mismatches.append(f"{display_col_name}: mismatch detected")
+            
+            column_comparisons.append(col_comp)
         
         # Silent processing - no per-employee debug output
         
@@ -356,16 +397,23 @@ def compare_rows(
             rowStatus="matched"
         ))
     
-    # Log comparison summary
+    # Log comparison summary (without sensitive data)
     perfect_matches = sum(1 for r in results if r.overallMatch)
     mismatches = sum(1 for r in results if not r.overallMatch)
-    print(f"📊 Comparison: {perfect_matches} perfect matches, {mismatches} with mismatches")
+    logger.info(
+        f"Comparison completed: {perfect_matches} perfect matches, {mismatches} with mismatches",
+        extra={
+            "perfect_matches": perfect_matches,
+            "mismatches": mismatches,
+            "total_employees": len(results)
+        }
+    )
     
-    # Log unmatched employees (for information only, not included in response)
+    # Log unmatched employees count (without IDs)
     if only_in_vendor:
-        print(f"ℹ️  {len(only_in_vendor)} employees only in vendor (not included in response)")
+        logger.info(f"{len(only_in_vendor)} employees only in vendor", extra={"count": len(only_in_vendor)})
     if only_in_system:
-        print(f"ℹ️  {len(only_in_system)} employees only in system (not included in response)")
+        logger.info(f"{len(only_in_system)} employees only in system", extra={"count": len(only_in_system)})
     
     # Return matched employees and counts of unmatched employees
     return {

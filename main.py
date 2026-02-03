@@ -8,24 +8,26 @@ from starlette.responses import Response
 import uvicorn
 import json
 import os
+import uuid
 from datetime import datetime
 from models.schemas import ( 
     HeaderMatchingRequest,
     HeaderMatchingResponse,
     HeaderMatch,
     ManualMappingRequest,
-    ComparisonRequest,
     ComparisonResponse,
     MatchedVendorDataItem
 )
 from utils.data_processor import system_json_to_dataframe, vendor_json_to_dataframe
 from utils.header_matching import match_headers_ai
 from utils.comparison_engine import compare_rows
-from utils.helpers import (
-    filter_by_contractor, normalize_header_mapping, 
-    calculate_match_rate, calculate_basic_summary
-)
-from config import CONSTANT_HEADERS
+from utils.helpers import normalize_header_mapping
+from config import CONSTANT_HEADERS, LOG_LEVEL, LOG_JSON, LOG_FILE
+from utils.normalization import normalize_header_name
+from utils.logger import setup_logging, get_logger, SensitiveDataMasker
+
+# Set up structured logging
+logger = setup_logging(level=LOG_LEVEL, use_json=LOG_JSON, log_file=LOG_FILE)
 
 app = FastAPI(
     title="Paysheet Comparator API",
@@ -33,32 +35,29 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Middleware to store request body for exception handler
-class RequestBodyLoggerMiddleware(BaseHTTPMiddleware):
+# Middleware to add correlation ID and handle request logging
+class CorrelationIDMiddleware(BaseHTTPMiddleware):
+    """Add correlation ID to requests for tracing"""
     async def dispatch(self, request: Request, call_next):
-        # Only process POST requests
-        if request.method == "POST":
-            # Read the request body
-            body = await request.body()
-            
-            # Store body in request state for exception handler
-            request.state.body = body
-            try:
-                request.state.body_str = body.decode('utf-8') if body else ""
-            except Exception:
-                request.state.body_str = ""
-            
-            # Recreate the request with the body (since we consumed it)
-            async def receive():
-                return {"type": "http.request", "body": body}
-            request._receive = receive
+        # Generate correlation ID for request tracing
+        correlation_id = str(uuid.uuid4())
+        request.state.correlation_id = correlation_id
         
-        # Process the request and return response
+        # Add correlation ID to logger context
+        logger.info(
+            f"Request received: {request.method} {request.url.path}",
+            extra={"correlation_id": correlation_id, "method": request.method, "path": request.url.path}
+        )
+        
         response = await call_next(request)
+        
+        # Add correlation ID to response headers
+        response.headers["X-Correlation-ID"] = correlation_id
+        
         return response
 
-# Add request body logger middleware
-app.add_middleware(RequestBodyLoggerMiddleware)
+# Add correlation ID middleware
+app.add_middleware(CorrelationIDMiddleware)
 
 # CORS middleware for frontend communication
 app.add_middleware(
@@ -72,87 +71,30 @@ app.add_middleware(
 # Exception handler for validation errors
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Custom handler to print validation errors for debugging"""
-    import traceback
-    
-    print("\n" + "="*80)
-    print("❌ ERROR: Request Validation Failed (422 Unprocessable Entity)")
-    print("="*80)
-    print(f"📍 Path: {request.url.path}")
-    print(f"🔧 Method: {request.method}")
-    print(f"🌐 URL: {request.url}")
-    print("-"*80)
-    print("📋 Validation Errors (Detailed):")
+    """Custom handler for validation errors with GDPR-safe logging"""
+    correlation_id = getattr(request.state, 'correlation_id', 'unknown')
     errors = exc.errors()
-    for i, error in enumerate(errors, 1):
-        print(f"\n  Error {i}:")
-        print(f"    Location: {error.get('loc', [])}")
-        print(f"    Message: {error.get('msg', 'N/A')}")
-        print(f"    Type: {error.get('type', 'N/A')}")
-        if 'ctx' in error:
-            print(f"    Context: {error.get('ctx')}")
-    print("\n" + "-"*80)
-    print("📦 Full Error JSON:")
-    print(json.dumps(errors, indent=2))
-    print("-"*80)
-    print("📥 Request Body (if available):")
-    body_str = ""
-    body_json = None
     
-    # Try to get body from request state (set by middleware)
-    if hasattr(request.state, 'body_str') and request.state.body_str:
-        body_str = request.state.body_str
-    else:
-        # Fallback: try to read body directly
-        try:
-            body = await request.body()
-            body_str = body.decode('utf-8') if body else ""
-        except Exception as read_err:
-            print(f"(could not read body: {read_err})")
-            body_str = ""
-    
-    # Try to parse as JSON
-    if body_str:
-        try:
-            body_json = json.loads(body_str)
-            print(json.dumps(body_json, indent=2, default=str))
-        except:
-            print("(Raw body - not valid JSON):")
-            print(body_str[:1000] + ("..." if len(body_str) > 1000 else ""))
-    else:
-        print("(empty body)")
-    
-    # Save validation error to file for debugging
-    try:
-        logs_dir = "request_logs"
-        os.makedirs(logs_dir, exist_ok=True)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        safe_path = request.url.path.replace("/", "_").replace("\\", "_")
-        filename = f"{logs_dir}/validation_error_{safe_path}_{timestamp}.json"
-        
-        error_log_data = {
-            "timestamp": datetime.now().isoformat(),
+    # Log validation error WITHOUT sensitive data
+    logger.warning(
+        f"Request validation failed: {request.method} {request.url.path}",
+        extra={
+            "correlation_id": correlation_id,
             "method": request.method,
             "path": request.url.path,
-            "url": str(request.url),
             "validation_errors": errors,
-            "request_body": body_json if body_json else body_str if body_str else None
+            # DO NOT log request body - contains sensitive payroll data
         }
-        
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(error_log_data, f, indent=2, default=str, ensure_ascii=False)
-        
-        print(f"💾 Validation error saved to: {filename}")
-    except Exception as save_error:
-        print(f"⚠️  Failed to save validation error to file: {save_error}")
+    )
     
-    print("="*80 + "\n")
-    
-    # Return the standard validation error response
+    # Return the standard validation error response (without sensitive data)
     return JSONResponse(
         status_code=422,
-        content={"detail": errors, "body": "Check server logs for full request body", "saved_to": filename if 'filename' in locals() else None}
+        content={
+            "detail": errors,
+            "correlation_id": correlation_id,
+            "message": "Validation error. Check error details."
+        }
     )
 
 @app.get("/health")
@@ -171,7 +113,7 @@ async def root():
 
 
 @app.post("/api/v1/headers/match")
-async def match_headers(request: HeaderMatchingRequest):
+async def match_headers(http_request: Request, request: HeaderMatchingRequest):
     """
     Unified endpoint for header matching and comparison.
     
@@ -194,15 +136,15 @@ async def match_headers(request: HeaderMatchingRequest):
         
         # Determine mode based on headerCheck flag
         header_check_mode = request.headerCheck if request.headerCheck is not None else True
+        correlation_id = getattr(http_request.state, 'correlation_id', 'unknown')
         
-        print("\n" + "="*80)
-        print(f"🔀 MODE DETECTION: headerCheck = {header_check_mode}")
-        print("="*80)
+        logger.info(
+            f"Processing request: mode={'header_matching' if header_check_mode else 'comparison'}",
+            extra={"correlation_id": correlation_id, "mode": "header_matching" if header_check_mode else "comparison"}
+        )
         
         # Mode 1: Header Matching (headerCheck: true)
         if header_check_mode:
-            print("✅ MODE 1: Header Matching Mode")
-            print("="*80 + "\n")
             
             # Match ONLY constant headers using AI
             matched_headers_dict, unmatched_constant_header_names, unmatched_vendor_headers, constant_headers_status = match_headers_ai(
@@ -239,27 +181,42 @@ async def match_headers(request: HeaderMatchingRequest):
                 compensationId=request.compensationId
             )
             
-            # Log response summary
-            print(f"✅ Header Matching Complete: {len(response.matchedHeaders)} matched, {len(response.unmatchedConstantHeaders)} unmatched")
+            # Log response summary (without sensitive data)
+            logger.info(
+                f"Header matching completed: {len(response.matchedHeaders)} matched, {len(response.unmatchedConstantHeaders)} unmatched",
+                extra={
+                    "correlation_id": correlation_id,
+                    "matched_count": len(response.matchedHeaders),
+                    "unmatched_count": len(response.unmatchedConstantHeaders)
+                }
+            )
             
             return response
         
         # Mode 2: Comparison (headerCheck: false)
         else:
-            print("✅ MODE 2: Comparison Mode")
-            if request.matchedVendorData:
-                print(f"   - Using {len(request.matchedVendorData)} column mappings")
-            print("="*80 + "\n")
+            logger.info(
+                f"Comparison mode: using {len(request.matchedVendorData) if request.matchedVendorData else 0} column mappings",
+                extra={"correlation_id": correlation_id, "mapping_count": len(request.matchedVendorData) if request.matchedVendorData else 0}
+            )
             
             # Convert matchedVendorData to header mapping format
-            # matchedVendorData format: {systemColumn, mappedVendorHeader, ...}
-            # We need: {vendorHeader: systemHeader}
+            # Supports both single column (mappedVendorHeader) and multiple columns (mappedVendorHeaders)
+            # Format: {vendorHeader: systemHeader} for single, {(vendor1, vendor2): systemHeader} for multiple
             header_mapping = {}
             if request.matchedVendorData:
                 for item in request.matchedVendorData:
-                    vendor_header = item.mappedVendorHeader
                     system_header = item.systemColumn
-                    header_mapping[vendor_header] = system_header
+                    
+                    # Check if single or multiple vendor columns
+                    if item.mappedVendorHeader:
+                        # Single column (backward compatible)
+                        vendor_header = item.mappedVendorHeader
+                        header_mapping[vendor_header] = system_header
+                    elif item.mappedVendorHeaders:
+                        # Multiple columns - use tuple as key for multi-column mapping
+                        vendor_headers_tuple = tuple(item.mappedVendorHeaders)
+                        header_mapping[vendor_headers_tuple] = system_header
             
             if not header_mapping:
                 raise HTTPException(
@@ -267,26 +224,32 @@ async def match_headers(request: HeaderMatchingRequest):
                     detail="No valid header mappings found in matchedVendorData. Cannot perform comparison."
                 )
             
-            # Log header mappings
-            print(f"🔍 Using {len(header_mapping)} header mappings from matchedVendorData")
-            
-            # Filter by contractor if provided
-            if request.contractorFilter:
-                df_system = filter_by_contractor(df_system, request.contractorFilter)
-                df_vendor = filter_by_contractor(df_vendor, request.contractorFilter)
+            # Log header mappings (without sensitive data)
+            logger.info(
+                f"Using {len(header_mapping)} header mappings",
+                extra={"correlation_id": correlation_id, "mapping_count": len(header_mapping)}
+            )
             
             # Normalize header mapping to match DataFrame column names
             normalized_mapping = normalize_header_mapping(header_mapping, df_vendor, df_system)
             
-            # Log warnings for unmapped columns
+            # Log warnings for unmapped columns (without sensitive data)
             normalized_keys = set(normalized_mapping.keys())
+            unmapped_count = 0
             for vendor_key, system_key in header_mapping.items():
                 # Check if this mapping was successfully normalized
-                vendor_found = any(str(v).strip().lower() == str(vendor_key).strip().lower() for v in normalized_keys)
+                vendor_found = any(normalize_header_name(str(v)) == normalize_header_name(str(vendor_key)) for v in normalized_keys)
                 if not vendor_found:
-                    print(f"⚠️  Warning: Could not find columns for mapping: '{vendor_key}' -> '{system_key}'")
+                    unmapped_count += 1
+                    logger.warning(
+                        f"Could not find columns for mapping",
+                        extra={"correlation_id": correlation_id, "vendor_key": "[MASKED]", "system_key": "[MASKED]"}
+                    )
             
-            print(f"✅ Normalized {len(normalized_mapping)} header mappings")
+            logger.info(
+                f"Normalized {len(normalized_mapping)} header mappings",
+                extra={"correlation_id": correlation_id, "normalized_count": len(normalized_mapping)}
+            )
             
             if not normalized_mapping:
                 raise HTTPException(
@@ -307,6 +270,14 @@ async def match_headers(request: HeaderMatchingRequest):
             only_in_system_count = comparison_result["only_in_system_count"]
             
             # Calculate summary statistics
+            from utils.statistics_calculator import (
+                calculate_basic_summary,
+                calculate_overall_summary,
+                calculate_column_statistics,    
+                calculate_insights,
+                calculate_quick_stats
+            )
+            
             summary = calculate_basic_summary(
                 row_comparisons, 
                 len(normalized_mapping),
@@ -317,14 +288,6 @@ async def match_headers(request: HeaderMatchingRequest):
             matched_rows = summary["matchedRows"]
             unmatched_rows = summary["unmatchedRows"]
             match_rate = summary["matchRate"]
-            
-            # Calculate enhanced statistics
-            from utils.statistics_calculator import (
-                calculate_overall_summary,
-                calculate_column_statistics,    
-                calculate_insights,
-                calculate_quick_stats
-            )
             
             column_statistics = calculate_column_statistics(row_comparisons, top_n=5)
             overall_summary = calculate_overall_summary(row_comparisons, column_statistics)
@@ -352,11 +315,18 @@ async def match_headers(request: HeaderMatchingRequest):
                 compensationId=request.compensationId
             )
             
-            # Log comparison summary
-            print(f"✅ Comparison Complete:")
-            print(f"   Total Rows: {total_rows} | Match Rate: {match_rate:.2%}")
-            print(f"   Overall Match: {overall_summary.totalMatchPercentage:.2f}%")
-            print(f"   Columns: {len(normalized_mapping)} | Perfect Matches: {quick_stats.perfectMatches}")
+            # Log comparison summary (without sensitive data)
+            logger.info(
+                f"Comparison completed: {total_rows} rows, {match_rate:.2%} match rate",
+                extra={
+                    "correlation_id": correlation_id,
+                    "total_rows": total_rows,
+                    "match_rate": match_rate,
+                    "overall_match_percentage": overall_summary.totalMatchPercentage,
+                    "columns_compared": len(normalized_mapping),
+                    "perfect_matches": quick_stats.perfectMatches
+                }
+            )
             
             return response
         
@@ -380,16 +350,16 @@ async def manual_map_headers(request: ManualMappingRequest):
         df_vendor = vendor_json_to_dataframe(request.vendorPaysheetData)
         
         # Normalize header mapping keys to match DataFrame column names
-        vendor_headers_lower = {str(h).strip().lower(): h for h in df_vendor.columns}
-        system_headers_lower = {str(h).strip().lower(): h for h in df_system.columns}
+        vendor_headers_lower = {normalize_header_name(str(h)): h for h in df_vendor.columns}
+        system_headers_lower = {normalize_header_name(str(h)): h for h in df_system.columns}
         
         # Process the complete header mapping from frontend
         matched_headers_dict = {}
         matched_headers_list = []
         
         for vendor_key, system_key in request.headerMapping.items():
-            vendor_header = vendor_headers_lower.get(str(vendor_key).strip().lower())
-            system_header = system_headers_lower.get(str(system_key).strip().lower())
+            vendor_header = vendor_headers_lower.get(normalize_header_name(str(vendor_key)))
+            system_header = system_headers_lower.get(normalize_header_name(str(system_key)))
             
             if vendor_header and system_header:
                 matched_headers_dict[vendor_header] = system_header
@@ -437,85 +407,8 @@ async def manual_map_headers(request: ManualMappingRequest):
         raise HTTPException(status_code=500, detail=f"Error during manual header mapping: {str(e)}")
 
 
-@app.post("/api/v1/compare", response_model=ComparisonResponse)
-async def compare_paysheets(request: ComparisonRequest):
-    """
-    Perform row-by-row comparison between vendor and system paysheets.
-    
-    Requires:
-    - systemData and vendorPaysheetData
-    - Complete headerMapping (from AI matching + manual mapping)
-    - Optional contractorFilter to filter by contractor name
-    
-    Returns:
-    - Row-by-row comparison results with differences
-    - Match status for each column
-    - Summary statistics
-    """
-    try:
-        # Convert JSON to DataFrames
-        df_system = system_json_to_dataframe(request.systemData)
-        df_vendor = vendor_json_to_dataframe(request.vendorPaysheetData)
-        
-        # Filter by contractor if provided
-        if request.contractorFilter:
-            df_system = filter_by_contractor(df_system, request.contractorFilter)
-            df_vendor = filter_by_contractor(df_vendor, request.contractorFilter)
-        
-        # Normalize header mapping
-        normalized_mapping = normalize_header_mapping(request.headerMapping, df_vendor, df_system)
-        
-        if not normalized_mapping:
-            raise HTTPException(
-                status_code=400, 
-                detail="No valid header mappings found. Please ensure header mapping matches DataFrame columns."
-            )   
-        
-        # Perform row-by-row comparison
-        comparison_result = compare_rows(
-            df_vendor=df_vendor,
-            df_system=df_system,
-            header_mapping=normalized_mapping
-        )
-        
-        # Extract results and unmatched counts
-        row_comparisons = comparison_result["results"]
-        only_in_vendor_count = comparison_result["only_in_vendor_count"]
-        only_in_system_count = comparison_result["only_in_system_count"]
-        
-        # Calculate summary statistics
-        summary = calculate_basic_summary(
-            row_comparisons, 
-            len(normalized_mapping),
-            only_in_vendor_count=only_in_vendor_count,
-            only_in_system_count=only_in_system_count
-        )
-        total_rows = summary["totalRows"]
-        matched_rows = summary["matchedRows"]
-        unmatched_rows = summary["unmatchedRows"]
-        match_rate = summary["matchRate"]
-        
-        # Filter to only show mismatched employees in response (statistics already calculated from full data)
-        filtered_row_comparisons = [r for r in row_comparisons if not r.overallMatch]
-        
-        return ComparisonResponse(
-            rowComparisons=filtered_row_comparisons, 
-            summary=summary,
-            totalRows=total_rows,
-            matchedRows=matched_rows,
-            unmatchedRows=unmatched_rows,
-            matchRate=match_rate,
-            month=request.month,
-            processingStage=request.processingStage,
-            year=request.year,
-            paysheetComparisionId=request.paysheetComparisionId,
-            compensationId=request.compensationId
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during comparison: {str(e)}")
+# Removed /api/v1/compare endpoint - not used
+# Comparison functionality is available via /api/v1/headers/match with headerCheck=false
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -7,6 +7,42 @@ from models.schemas import (
 from utils.comparison_engine import is_text_only_column
 
 
+def calculate_basic_summary(
+    row_comparisons: List[RowComparisonResult], 
+    columns_compared: int,
+    only_in_vendor_count: int = 0,
+    only_in_system_count: int = 0
+) -> Dict[str, Any]:
+    """
+    Calculate basic summary statistics for comparison response.
+    
+    This function provides the summary structure needed by the API response,
+    which is different from calculate_overall_summary (which provides enhanced stats).
+    """
+    total_rows = len(row_comparisons)
+    matched_rows = sum(1 for r in row_comparisons if r.overallMatch)
+    unmatched_rows = total_rows - matched_rows
+    
+    # Calculate match rate
+    matched_employees = [r for r in row_comparisons if r.rowStatus == "matched"]
+    total_comparisons = sum(len(r.columnComparisons) for r in matched_employees)
+    matched_comparisons = sum(
+        sum(1 for cc in r.columnComparisons if cc.isMatch)
+        for r in matched_employees
+    )
+    match_rate = (matched_comparisons / total_comparisons) if total_comparisons > 0 else 0.0
+    
+    return {
+        "totalRows": total_rows,
+        "matchedRows": matched_rows,
+        "unmatchedRows": unmatched_rows,
+        "onlyInVendor": only_in_vendor_count,
+        "onlyInSystem": only_in_system_count,
+        "matchRate": match_rate,
+        "columnsCompared": columns_compared
+    }
+
+
 def calculate_overall_summary(
     row_comparisons: List[RowComparisonResult], 
     column_statistics: List[ColumnStatistic]

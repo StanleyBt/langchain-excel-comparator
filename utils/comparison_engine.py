@@ -54,11 +54,6 @@ def format_column_name(column_name: str) -> str:
     return ' '.join(formatted_words)
 
 
-# Use centralized normalization functions
-# normalize_text -> normalize_text_value (from utils.normalization)
-# normalize_column_name_for_check -> normalize_column_name_for_check (from utils.normalization)
-
-
 def is_text_only_column(column_name: str) -> bool:
     """
     Check if a column should always be treated as text (never as numeric).
@@ -395,7 +390,7 @@ def compare_rows(
             system_col = _mapping_system_col(mapping_value)
             formula_steps = None
             if isinstance(mapping_value, dict):
-                formula_steps = mapping_value.get("formula_steps") or mapping_value.get("formulaSteps")
+                formula_steps = mapping_value.get("formula_steps")
             vendor_cols = list(vendor_col_key) if isinstance(vendor_col_key, tuple) else [vendor_col_key]
             vendor_cols_exist = all(col in df_vendor.columns for col in vendor_cols)
 

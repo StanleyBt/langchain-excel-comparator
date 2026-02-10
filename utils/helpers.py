@@ -6,17 +6,17 @@ from utils.normalization import normalize_header_name
 
 
 def _mapping_system_header(value: Any) -> str:
-    """Extract system header string from mapping value (str or dict with system_header/systemColumn)."""
+    """Extract system header string from mapping value (str or dict with system_header)."""
     if isinstance(value, dict):
-        return value.get("system_header") or value.get("systemColumn") or ""
+        return value.get("system_header", "")
     return str(value)
 
 
 def _mapping_formula_steps(value: Any) -> Any:
-    """Extract formula steps list from mapping value (supports formula_steps and formulaSteps)."""
+    """Extract formula steps list from mapping value."""
     if not isinstance(value, dict):
         return None
-    return value.get("formula_steps") or value.get("formulaSteps")
+    return value.get("formula_steps")
 
 
 def normalize_header_mapping(

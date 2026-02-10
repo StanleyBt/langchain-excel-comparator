@@ -4,7 +4,6 @@ from .schemas import (
     HeaderMatchingRequest,
     HeaderMatchingResponse,
     HeaderMatch,
-    ManualMappingRequest,
     ComparisonResponse,
     RowComparisonResult,
     ColumnComparison
@@ -15,7 +14,6 @@ __all__ = [
     "HeaderMatchingRequest",
     "HeaderMatchingResponse",
     "HeaderMatch",
-    "ManualMappingRequest",
     "ComparisonResponse",
     "RowComparisonResult",
     "ColumnComparison"

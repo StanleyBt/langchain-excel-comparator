@@ -1,5 +1,5 @@
 # models/schemas.py
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Optional, Any, Union
 
 
@@ -15,9 +15,6 @@ class SystemDataItem(BaseModel):
         if isinstance(v, (int, float)):
             return str(int(v))
         return str(v) if v is not None else None
-
-
-# Removed VendorPaysheetItem - not used (vendor data uses Dict[str, Any] directly)
 
 
 class FormulaStep(BaseModel):
@@ -41,7 +38,7 @@ class MatchedVendorDataItem(BaseModel):
 
     Uses mappedVendorHeaders (list). When formulaSteps is provided, vendor value
     is computed by applying each step's operator (+, -, *, /); otherwise
-    single column is used as-is, multiple columns are summed for backward compatibility.
+    single column is used as-is, multiple columns are summed.
     """
     systemColumn: str = Field(..., description="System column name")
     mappedVendorHeaders: List[str] = Field(..., min_length=1, description="Vendor header names (list)")
@@ -88,21 +85,6 @@ class HeaderMatchingResponse(BaseModel):
     compensationId: Optional[int] = Field(None, description="Compensation ID from request")
 
 
-class ManualMappingRequest(BaseModel):
-    """Request model for manual header mapping"""
-    organizationId: Optional[int] = None
-    filesCount: Optional[int] = None
-    month: Optional[int] = None
-    processingStage: Optional[str] = None
-    year: Optional[int] = None
-    compensationId: Optional[int] = None
-    paysheetComparisionId: Optional[int] = None
-    systemData: List[SystemDataItem] = Field(..., description="System paysheet data array")
-    vendorPaysheetData: List[Dict[str, Any]] = Field(..., description="Vendor paysheet data array")
-    headerMapping: Dict[str, str] = Field(..., description="Complete header mapping: {vendorHeader: systemHeader}. Includes both auto-matched and manually mapped headers.")
-    constantHeaders: Optional[List[str]] = Field(None, description="List of constant headers to check. Caller should always send this.")
-
-
 class ColumnComparison(BaseModel):
     """Comparison result for a single column"""
     columnName: str = Field(..., description="Column name being compared")
@@ -119,10 +101,6 @@ class RowComparisonResult(BaseModel):
     columnComparisons: List[ColumnComparison] = Field(..., description="Comparison results for each column")
     overallMatch: bool = Field(..., description="Whether all columns match")
     rowStatus: str = Field(..., description="Status: 'matched', 'only_in_vendor', 'only_in_system'")
-
-
-# Removed ComparisonRequest - endpoint /api/v1/compare was removed
-# Comparison functionality is available via /api/v1/headers/match with headerCheck=false
 
 
 class ColumnMismatchDetail(BaseModel):
@@ -210,7 +188,7 @@ class OverallSummary(BaseModel):
 class ComparisonResponse(BaseModel):
     """Response model for comparison endpoint"""
     rowComparisons: List[RowComparisonResult] = Field(..., description="Comparison results for each row")
-    summary: Dict[str, Any] = Field(..., description="Summary statistics (backward compatibility)")
+    summary: Dict[str, Any] = Field(..., description="Summary statistics")
     totalRows: int = Field(..., description="Total number of rows compared")
     matchedRows: int = Field(..., description="Number of rows with all columns matching")
     unmatchedRows: int = Field(..., description="Number of rows with mismatches")

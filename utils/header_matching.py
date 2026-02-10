@@ -1,4 +1,4 @@
-# excel_comparator/utils/header_matching.py
+# utils/header_matching.py
 import pandas as pd
 import json
 import re
@@ -15,17 +15,6 @@ from utils.normalization import normalize_header_name
 from utils.logger import get_logger
 
 logger = get_logger("header_matching")
-
-# Removed Streamlit-specific functions: find_header_row, detect_header_row, run_header_mapping
-# These were only used by the Streamlit UI app which has been removed
-
-# Alias for backward compatibility
-def normalize_header_for_matching(header: str) -> str:
-    """
-    Normalize header name for matching comparison.
-    Uses centralized normalization function.
-    """
-    return normalize_header_name(header, for_matching=True)
 
 
 def match_headers_ai(
@@ -67,7 +56,7 @@ def match_headers_ai(
     
     # Step 1: Match ONLY constant headers
     for const_header in constant_headers:
-        const_normalized = normalize_header_for_matching(const_header)
+        const_normalized = normalize_header_name(const_header, for_matching=True)
         matched = False
         
         # Get variations ordered by priority
@@ -78,7 +67,7 @@ def match_headers_ai(
         high_confidence_hints = []  # List of (vendor_header, priority_score)
         
         for vendor_header in vendor_headers:
-            vendor_norm = normalize_header_for_matching(vendor_header)
+            vendor_norm = normalize_header_name(vendor_header, for_matching=True)
             
             # Check if vendor header matches any variation (for hint generation)
             matches_variation = False
@@ -163,11 +152,11 @@ def match_headers_ai(
                 if vendor_header in matched_headers:
                     continue
                     
-                vendor_norm = normalize_header_for_matching(vendor_header)
+                vendor_norm = normalize_header_name(vendor_header, for_matching=True)
                 
                 # Find matching system header
                 for system_header in system_headers:
-                    system_norm = normalize_header_for_matching(system_header)
+                    system_norm = normalize_header_name(system_header, for_matching=True)
                     # Check if system header matches any variation
                     if any(var in system_norm or system_norm in var for var in variations):
                         matched_headers[vendor_header] = system_header

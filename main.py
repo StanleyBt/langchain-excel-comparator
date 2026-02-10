@@ -4,17 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
 import uvicorn
-import json
-import os
 import uuid
-from datetime import datetime
-from models.schemas import ( 
+from models.schemas import (
     HeaderMatchingRequest,
     HeaderMatchingResponse,
     HeaderMatch,
-    ManualMappingRequest,
     ComparisonResponse,
     MatchedVendorDataItem
 )
@@ -23,8 +18,7 @@ from utils.header_matching import match_headers_ai
 from utils.comparison_engine import compare_rows
 from utils.helpers import normalize_header_mapping
 from config import LOG_LEVEL, LOG_JSON, LOG_FILE
-from utils.normalization import normalize_header_name
-from utils.logger import setup_logging, get_logger, SensitiveDataMasker
+from utils.logger import setup_logging, get_logger
 
 # Set up structured logging
 logger = setup_logging(level=LOG_LEVEL, use_json=LOG_JSON, log_file=LOG_FILE)
@@ -326,81 +320,6 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
-
-@app.post("/api/v1/headers/manual-map", response_model=HeaderMatchingResponse)
-async def manual_map_headers(request: ManualMappingRequest):
-    """
-    Accept complete header mapping from frontend (includes both auto-matched and manually mapped headers).
-    
-    This endpoint validates the complete header mapping and returns it in the response format.
-    """
-    try:
-        # Convert JSON to DataFrames
-        df_system = system_json_to_dataframe(request.systemData)
-        df_vendor = vendor_json_to_dataframe(request.vendorPaysheetData)
-        
-        # Normalize header mapping keys to match DataFrame column names
-        vendor_headers_lower = {normalize_header_name(str(h)): h for h in df_vendor.columns}
-        system_headers_lower = {normalize_header_name(str(h)): h for h in df_system.columns}
-        
-        # Process the complete header mapping from frontend
-        matched_headers_dict = {}
-        matched_headers_list = []
-        
-        for vendor_key, system_key in request.headerMapping.items():
-            vendor_header = vendor_headers_lower.get(normalize_header_name(str(vendor_key)))
-            system_header = system_headers_lower.get(normalize_header_name(str(system_key)))
-            
-            if vendor_header and system_header:
-                matched_headers_dict[vendor_header] = system_header
-                # Determine match type (check if it was auto-matched or manual)
-                match_type = "manual"  # All from this endpoint are manual mappings
-                matched_headers_list.append(
-                    HeaderMatch(
-                        vendorHeader=vendor_header,
-                        systemHeader=system_header,
-                        matchType=match_type
-                    )
-                )
-        
-        # Use constant headers from request (caller always sends constantHeaders)
-        constant_headers_to_check = request.constantHeaders or []
-        # Check constant headers status
-        constant_headers_status = {}
-        unmatched_constant_header_names = []
-        
-        for const_header in constant_headers_to_check:
-            # Check if this constant header is in the mapping
-            const_found = False
-            for vendor_h, system_h in matched_headers_dict.items():
-                system_norm = str(system_h).strip().upper()
-                if system_norm == const_header.upper():
-                    constant_headers_status[const_header] = True
-                    const_found = True
-                    break
-            
-            if not const_found:
-                constant_headers_status[const_header] = False
-                unmatched_constant_header_names.append(const_header)
-        
-        return HeaderMatchingResponse(
-            matchedHeaders=matched_headers_list,
-            unmatchedConstantHeaders=unmatched_constant_header_names,
-            constantHeadersStatus=constant_headers_status,
-            message="Header mapping completed. All constant headers should be mapped before proceeding to comparison.",
-            month=request.month,
-            processingStage=request.processingStage,
-            year=request.year,
-            paysheetComparisionId=request.paysheetComparisionId,
-            compensationId=request.compensationId
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during manual header mapping: {str(e)}")
-
-
-# Removed /api/v1/compare endpoint - not used
-# Comparison functionality is available via /api/v1/headers/match with headerCheck=false
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

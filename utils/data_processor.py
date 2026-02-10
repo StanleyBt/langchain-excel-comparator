@@ -53,7 +53,3 @@ def vendor_json_to_dataframe(vendor_data: List[Dict[str, Any]]) -> pd.DataFrame:
     
     return df
 
-
-# Removed unused functions: extract_headers_from_dataframe, normalize_header_name, find_constant_headers_in_dataframe
-# These are handled in header_matching.py
-

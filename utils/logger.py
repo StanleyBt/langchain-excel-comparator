@@ -79,36 +79,6 @@ class SensitiveDataMasker:
         
         return value
     
-    @classmethod
-    def mask_request_body(cls, body: Any) -> Any:
-        """
-        Mask sensitive data from request body.
-        
-        Args:
-            body: Request body (dict, list, or string)
-            
-        Returns:
-            Masked request body
-        """
-        if body is None:
-            return None
-        
-        if isinstance(body, str):
-            try:
-                # Try to parse as JSON
-                body_json = json.loads(body)
-                return cls.mask_value(body_json, "request_body")
-            except (json.JSONDecodeError, TypeError):
-                # If not JSON, just mask the string
-                return "[MASKED: Request body contains sensitive data]"
-        elif isinstance(body, dict):
-            return cls.mask_value(body, "request_body")
-        elif isinstance(body, list):
-            return [cls.mask_value(item, "request_body") for item in body]
-        else:
-            return "[MASKED: Request body]"
-
-
 class StructuredFormatter(logging.Formatter):
     """JSON formatter for structured logging"""
     
@@ -205,17 +175,3 @@ def get_logger(name: str = "paysheet_comparator") -> logging.Logger:
         Logger instance
     """
     return logging.getLogger(name)
-
-
-def mask_sensitive_data(data: Any, field_name: str = "") -> Any:
-    """
-    Convenience function to mask sensitive data.
-    
-    Args:
-        data: Data to mask
-        field_name: Field name for context
-        
-    Returns:
-        Masked data
-    """
-    return SensitiveDataMasker.mask_value(data, field_name)

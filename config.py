@@ -1,4 +1,4 @@
-# excel_comparator/config.py
+# config.py
 # === Configuration Constants ===
 
 import os

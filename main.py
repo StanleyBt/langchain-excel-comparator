@@ -22,7 +22,7 @@ from utils.data_processor import system_json_to_dataframe, vendor_json_to_datafr
 from utils.header_matching import match_headers_ai
 from utils.comparison_engine import compare_rows
 from utils.helpers import normalize_header_mapping
-from config import CONSTANT_HEADERS, LOG_LEVEL, LOG_JSON, LOG_FILE
+from config import LOG_LEVEL, LOG_JSON, LOG_FILE
 from utils.normalization import normalize_header_name
 from utils.logger import setup_logging, get_logger, SensitiveDataMasker
 
@@ -145,10 +145,11 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
         
         # Mode 1: Header Matching (headerCheck: true)
         if header_check_mode:
-            
+            # Use constant headers from request (caller always sends constantHeaders)
+            constant_headers = request.constantHeaders or []
             # Match ONLY constant headers using AI
             matched_headers_dict, unmatched_constant_header_names, unmatched_vendor_headers, constant_headers_status = match_headers_ai(
-                df_vendor, df_system
+                df_vendor, df_system, constant_headers=constant_headers
             )
             
             # Convert matched headers to response format (only constant headers)
@@ -201,22 +202,16 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
             )
             
             # Convert matchedVendorData to header mapping format
-            # Supports both single column (mappedVendorHeader) and multiple columns (mappedVendorHeaders)
-            # Format: {vendorHeader: systemHeader} for single, {(vendor1, vendor2): systemHeader} for multiple
+            # Key: tuple(mappedVendorHeaders). Value: { system_header, formula_steps } for formula-driven comparison
             header_mapping = {}
             if request.matchedVendorData:
                 for item in request.matchedVendorData:
-                    system_header = item.systemColumn
-                    
-                    # Check if single or multiple vendor columns
-                    if item.mappedVendorHeader:
-                        # Single column (backward compatible)
-                        vendor_header = item.mappedVendorHeader
-                        header_mapping[vendor_header] = system_header
-                    elif item.mappedVendorHeaders:
-                        # Multiple columns - use tuple as key for multi-column mapping
-                        vendor_headers_tuple = tuple(item.mappedVendorHeaders)
-                        header_mapping[vendor_headers_tuple] = system_header
+                    vendor_headers_tuple = tuple(item.mappedVendorHeaders)
+                    mapping_value = {
+                        "system_header": item.systemColumn,
+                        "formula_steps": item.formulaSteps,
+                    }
+                    header_mapping[vendor_headers_tuple] = mapping_value
             
             if not header_mapping:
                 raise HTTPException(
@@ -233,18 +228,13 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
             # Normalize header mapping to match DataFrame column names
             normalized_mapping = normalize_header_mapping(header_mapping, df_vendor, df_system)
             
-            # Log warnings for unmapped columns (without sensitive data)
-            normalized_keys = set(normalized_mapping.keys())
-            unmapped_count = 0
-            for vendor_key, system_key in header_mapping.items():
-                # Check if this mapping was successfully normalized
-                vendor_found = any(normalize_header_name(str(v)) == normalize_header_name(str(vendor_key)) for v in normalized_keys)
-                if not vendor_found:
-                    unmapped_count += 1
-                    logger.warning(
-                        f"Could not find columns for mapping",
-                        extra={"correlation_id": correlation_id, "vendor_key": "[MASKED]", "system_key": "[MASKED]"}
-                    )
+            # Log warning if some mappings could not be normalized
+            unmapped_count = len(header_mapping) - len(normalized_mapping)
+            if unmapped_count > 0:
+                logger.warning(
+                    f"Could not find columns for {unmapped_count} mapping(s)",
+                    extra={"correlation_id": correlation_id, "unmapped_count": unmapped_count}
+                )
             
             logger.info(
                 f"Normalized {len(normalized_mapping)} header mappings",
@@ -373,11 +363,13 @@ async def manual_map_headers(request: ManualMappingRequest):
                     )
                 )
         
+        # Use constant headers from request (caller always sends constantHeaders)
+        constant_headers_to_check = request.constantHeaders or []
         # Check constant headers status
         constant_headers_status = {}
         unmatched_constant_header_names = []
         
-        for const_header in CONSTANT_HEADERS:
+        for const_header in constant_headers_to_check:
             # Check if this constant header is in the mapping
             const_found = False
             for vendor_h, system_h in matched_headers_dict.items():

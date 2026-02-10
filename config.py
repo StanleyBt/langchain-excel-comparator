@@ -33,84 +33,59 @@ LOG_JSON = os.getenv("LOG_JSON", "true").lower() == "true"
 LOG_FILE = os.getenv("LOG_FILE", None)
 
 # ============================================================================
-# CONSTANT HEADERS CONFIGURATION
+# COLUMNS TO CHECK (single source of truth)
 # ============================================================================
-# These are the only headers that will be matched and returned in the response.
-# You can add, remove, or modify these headers as needed.
-# 
-# Format: List of header names (case-insensitive, will be normalized)
+# Add or remove columns here. Each entry defines one column that will be
+# matched between vendor and system paysheets and included in comparison.
+#
+# To ADD a column: append a new dict with name, text_only, variations, priority_keywords.
+# To REMOVE a column: delete its dict.
+#
+# Fields per column:
+#   name: Canonical header name (case-insensitive). Used in API responses.
+#   text_only: True = compare as text (e.g. IDs, codes); False = allow numeric comparison/tolerance.
+#   variations: Possible names in vendor files (used for matching). Include common spellings.
+#   priority_keywords: List of [keyword_lists]. Each keyword_list is a list of words; vendor headers
+#       containing all words in a list get that priority (index 0 = best). Used for AI hints only.
 # ============================================================================
-CONSTANT_HEADERS: List[str] = [
-    "EMPLOYEE_NUMBER",
-    "NET_PAY",
-    "INVOICE_VALUE"
+CONSTANT_HEADER_CONFIG: List[Dict] = [
+    {
+        "name": "EMPLOYEE_NUMBER",
+        "text_only": True,
+        "variations": ["employee_number", "employee number", "employeenumber", "employee id", "employeeid", "employee no", "employee_no"],
+        "priority_keywords": [
+            ["employee", "number"],
+            ["employee", "no"],
+            ["employee", "id"],
+        ],
+    },
+    {
+        "name": "NET_PAY",
+        "text_only": False,
+        "variations": ["net_pay", "net pay", "netpay", "net salary", "netsalary", "net_amount", "net amount"],
+        "priority_keywords": [
+            ["net", "pay"],
+            ["netpay"],
+            ["net", "salary"],
+        ],
+    },
+    {
+        "name": "INVOICE_VALUE",
+        "text_only": False,
+        "variations": ["invoice_value", "invoice value", "invoicevalue", "invoice_amount", "invoice amount", "invoiceamount"],
+        "priority_keywords": [
+            ["invoice", "value"],
+            ["invoice", "amount"],
+            ["invoicevalue"],
+        ],
+    },
 ]
 
-# ============================================================================
-# HEADER MATCHING PRIORITY CONFIGURATION
-# ============================================================================
-# Define priority keywords for matching vendor headers to constant headers.
-# Headers matching higher priority keywords (lower index) are preferred.
-# 
-# IMPORTANT: This is used ONLY for generating hints in Phase 1 of header matching.
-# The AI (Phase 2) makes the final matching decision autonomously based on semantic
-# understanding. These priorities help the AI prioritize likely candidates, but
-# the AI can override them if it finds a better semantic match.
-# 
-# Format: Dict[constant_header_name, List[List[keywords]]]
-# - Each inner list represents a priority level (index 0 = highest priority)
-# - Headers containing ALL keywords in a list get that priority level
-# - Lower index = higher priority (used for sorting hints)
-# ============================================================================
-HEADER_MATCHING_PRIORITY: Dict[str, List[List[str]]] = {
-    "EMPLOYEE_NUMBER": [
-        ["employee", "number"],      # Best: "employee" and "number"
-        ["employee", "no"],          # Good: "employee" and "no"
-        ["employee", "id"]           # Less preferred: "employee" and "id"
-    ],
-    "NET_PAY": [
-        ["net", "pay"],              # Best: "net" and "pay"
-        ["netpay"],                  # Alternative: "netpay"
-        ["net", "salary"]            # Alternative: "net" and "salary"
-    ],
-    "INVOICE_VALUE": [
-        ["invoice", "value"],        # Best: "invoice" and "value"
-        ["invoice", "amount"],       # Alternative: "invoice" and "amount"
-        ["invoicevalue"]             # Alternative: "invoicevalue"
-    ]
-    # Add more priority rules for other constant headers as needed
-}
-
-# ============================================================================
-# HEADER VARIATION MAPPINGS
-# ============================================================================
-# Define possible variations for each constant header.
-# Used for matching vendor headers to system headers.
-# 
-# Format: Dict[constant_header_name, List[variation_strings]]
-# ============================================================================
-HEADER_VARIATIONS: Dict[str, List[str]] = {
-    "EMPLOYEE_NUMBER": ["employee_number", "employee number", "employeenumber", "employee id", "employeeid", "employee no", "employee_no"],
-    "NET_PAY": ["net_pay", "net pay", "netpay", "net salary", "netsalary", "net_amount", "net amount"],
-    "INVOICE_VALUE": ["invoice_value", "invoice value", "invoicevalue", "invoice_amount", "invoice amount", "invoiceamount"]
-}
-
-# ============================================================================
-# COLUMN DATA TYPE CONFIGURATION
-# ============================================================================
-# Define which constant headers should be treated as text-only (never numeric).
-# This prevents numeric conversion issues (e.g., leading zeros lost, 
-# scientific notation, numeric tolerance applied).
-# 
-# Format: Set of constant header names that should be text-only
-# - These headers will be compared as exact text matches only
-# - All variations of these headers (from HEADER_VARIATIONS) are automatically included
-# ============================================================================
-TEXT_ONLY_CONSTANT_HEADERS: set = {
-    "EMPLOYEE_NUMBER",  # IDs should always be text to preserve leading zeros
-    # Add more constant headers here that should be text-only
-    # Examples: "CONTRACTOR", "VENDOR_CODE", "REFERENCE_NUMBER", etc.
-}
+# Derived from CONSTANT_HEADER_CONFIG (do not edit these directly)
+CONSTANT_HEADERS: List[str] = [c["name"] for c in CONSTANT_HEADER_CONFIG]
+HEADER_VARIATIONS: Dict[str, List[str]] = {c["name"]: c["variations"] for c in CONSTANT_HEADER_CONFIG}
+HEADER_MATCHING_PRIORITY: Dict[str, List[List[str]]] = {c["name"]: c["priority_keywords"] for c in CONSTANT_HEADER_CONFIG}
+TEXT_ONLY_CONSTANT_HEADERS: set = {c["name"] for c in CONSTANT_HEADER_CONFIG if c.get("text_only", False)}
 
 # ============================================================================
 # ADDITIONAL TEXT-ONLY COLUMN PATTERNS

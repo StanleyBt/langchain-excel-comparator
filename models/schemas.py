@@ -1,7 +1,6 @@
 # models/schemas.py
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Dict, Optional, Any, Union
-from config import CONSTANT_HEADERS
 
 
 class SystemDataItem(BaseModel):
@@ -20,33 +19,36 @@ class SystemDataItem(BaseModel):
 
 # Removed VendorPaysheetItem - not used (vendor data uses Dict[str, Any] directly)
 
+
+class FormulaStep(BaseModel):
+    """One step in a formula: firstOperand operator secondOperand (e.g. sgst + cgst)."""
+    firstOperand: str = Field(..., description="Vendor header name or step result ref e.g. _0")
+    operator: str = Field(..., description="Operation: +, -, *, or /")
+    secondOperand: str = Field(..., description="Vendor header name or step result ref e.g. _1")
+
+    @field_validator("operator")
+    @classmethod
+    def operator_allowed(cls, v: str) -> str:
+        allowed = {"+", "-", "*", "/"}
+        op = str(v).strip() if v else ""
+        if op not in allowed:
+            raise ValueError(f"operator must be one of {allowed}, got {v!r}")
+        return op
+
+
 class MatchedVendorDataItem(BaseModel):
-    """Matched vendor data item from frontend
-    
-    Supports both single and multiple vendor columns:
-    - Single column: Use mappedVendorHeader (backward compatible)
-    - Multiple columns: Use mappedVendorHeaders (sum will be calculated)
+    """Matched vendor data item from frontend.
+
+    Uses mappedVendorHeaders (list). When formulaSteps is provided, vendor value
+    is computed by applying each step's operator (+, -, *, /); otherwise
+    single column is used as-is, multiple columns are summed for backward compatibility.
     """
     systemColumn: str = Field(..., description="System column name")
-    mappedVendorHeader: Optional[str] = Field(None, description="Vendor header name (single column - backward compatible)")
-    mappedVendorHeaders: Optional[List[str]] = Field(None, description="Vendor header names (multiple columns - will be summed)")
+    mappedVendorHeaders: List[str] = Field(..., min_length=1, description="Vendor header names (list)")
+    formulaSteps: Optional[List[FormulaStep]] = Field(None, description="Optional formula steps to compute value from operands")
     status: Optional[str] = Field(None, description="Status of the match")
     issue: Optional[str] = Field(None, description="Any issues detected")
     matchType: Optional[str] = Field(None, description="Type of match: 'exact', 'semantic', or 'manual'")
-    
-    @model_validator(mode='after')
-    def validate_vendor_headers(self):
-        """Ensure either mappedVendorHeader or mappedVendorHeaders is provided, not both"""
-        mapped_single = self.mappedVendorHeader
-        mapped_multiple = self.mappedVendorHeaders
-        
-        if mapped_multiple and mapped_single:
-            raise ValueError("Cannot use both mappedVendorHeader and mappedVendorHeaders. Use one or the other.")
-        if not mapped_multiple and not mapped_single:
-            raise ValueError("Must provide either mappedVendorHeader (single) or mappedVendorHeaders (multiple)")
-        if mapped_multiple and len(mapped_multiple) == 0:
-            raise ValueError("mappedVendorHeaders cannot be empty. Provide at least one column.")
-        return self
 
 
 class HeaderMatchingRequest(BaseModel):
@@ -62,6 +64,7 @@ class HeaderMatchingRequest(BaseModel):
     vendorPaysheetData: List[Dict[str, Any]] = Field(..., description="Vendor paysheet data array (flat structure)")
     headerCheck: Optional[bool] = Field(default=True, description="If true, perform header matching. If false, perform comparison using matchedVendorData")
     matchedVendorData: Optional[List[MatchedVendorDataItem]] = Field(None, description="Matched vendor data for comparison mode. Required when headerCheck is false")
+    constantHeaders: Optional[List[str]] = Field(None, description="List of constant headers to match (e.g. ['EMPLOYEE_NUMBER','INVOICE_VALUE','GENDER']). Caller should always send this.")
 
 
 class HeaderMatch(BaseModel):
@@ -97,6 +100,7 @@ class ManualMappingRequest(BaseModel):
     systemData: List[SystemDataItem] = Field(..., description="System paysheet data array")
     vendorPaysheetData: List[Dict[str, Any]] = Field(..., description="Vendor paysheet data array")
     headerMapping: Dict[str, str] = Field(..., description="Complete header mapping: {vendorHeader: systemHeader}. Includes both auto-matched and manually mapped headers.")
+    constantHeaders: Optional[List[str]] = Field(None, description="List of constant headers to check. Caller should always send this.")
 
 
 class ColumnComparison(BaseModel):

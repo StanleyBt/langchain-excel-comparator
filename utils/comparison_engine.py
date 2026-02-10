@@ -4,7 +4,11 @@ import re
 from typing import Dict, List, Optional, Any, Tuple
 from models.schemas import RowComparisonResult, ColumnComparison
 from config import TEXT_ONLY_COLUMNS
-from utils.normalization import normalize_text_value, normalize_column_name_for_check, normalize_for_comparison
+from utils.normalization import (
+    normalize_text_value,
+    normalize_column_name_for_check,
+    normalize_for_comparison,
+)
 from utils.logger import get_logger
 
 logger = get_logger("comparison_engine")
@@ -196,31 +200,109 @@ def compare_column_values(
     )
 
 
+def _mapping_system_col(value: Any) -> str:
+    """Extract system column name from mapping value (str or dict with system_header)."""
+    if isinstance(value, dict):
+        return value.get("system_header", "")
+    return str(value)
+
+
+def _normalize_operand_key(name: str) -> str:
+    """Normalize for matching: strip, lower, collapse spaces/hyphens/underscores to single underscore."""
+    if not name:
+        return ""
+    s = str(name).strip().lower()
+    for ch in " -_":
+        s = s.replace(ch, "_")
+    while "__" in s:
+        s = s.replace("__", "_")
+    return s.strip("_")
+
+
+def _evaluate_formula_steps(
+    formula_steps: List[Any],
+    vendor_row: pd.Series,
+) -> Optional[float]:
+    """
+    Evaluate formula steps for one row.
+    Each step: firstOperand operator secondOperand (e.g. Take-Home + ALLOWANCE).
+    firstOperand = column 1 (base), secondOperand = column 2.
+    Operands are matched to row columns: exact match first, then normalized match (spaces/hyphens/underscores).
+    """
+    if not formula_steps:
+        return None
+    # Build context: row column name -> numeric value
+    context: Dict[str, float] = {}
+    context_normalized: Dict[str, float] = {}  # normalized key -> value (for flexible lookup)
+    for col in vendor_row.index:
+        val = vendor_row[col]
+        if val is not None and not pd.isna(val):
+            try:
+                key = str(col)
+                context[key] = float(val)
+                context_normalized[_normalize_operand_key(key)] = float(val)
+            except (ValueError, TypeError):
+                pass
+    step_results: List[float] = []
+    for i, step in enumerate(formula_steps):
+        op = getattr(step, "operator", None) or (step if isinstance(step, dict) else {}).get("operator")
+        op = str(op).strip() if op is not None else ""
+        first = getattr(step, "firstOperand", None) or (step if isinstance(step, dict) else {}).get("firstOperand", "")
+        second = getattr(step, "secondOperand", None) or (step if isinstance(step, dict) else {}).get("secondOperand", "")
+        if not op:
+            continue
+        # Resolve operands: _0, _1 = prior step result; else match row column (exact then normalized)
+        def resolve(name: Any) -> Optional[float]:
+            if name is None:
+                return None
+            s = str(name).strip()
+            if s.startswith("_") and s[1:].isdigit():
+                idx = int(s[1:])
+                if 0 <= idx < len(step_results):
+                    return step_results[idx]
+                return None
+            if s in context:
+                return context[s]
+            norm = _normalize_operand_key(s)
+            return context_normalized.get(norm)
+        a, b = resolve(first), resolve(second)
+        if a is None or b is None:
+            return None
+        if op == "+":
+            r = a + b
+        elif op == "-":
+            r = a - b
+        elif op == "*":
+            r = a * b
+        elif op == "/":
+            if b == 0:
+                return None
+            r = a / b
+        else:
+            return None
+        step_results.append(r)
+    return step_results[-1] if step_results else None
+
+
 def compare_rows(
     df_vendor: pd.DataFrame,
     df_system: pd.DataFrame,
-    header_mapping: Dict[Any, str],  # Supports both str (single) and tuple (multiple) keys
+    header_mapping: Dict[Any, Any],  # Keys: tuple of vendor headers. Values: str or dict with system_header, formula_steps
     employee_number_vendor_col: Optional[str] = None,
     employee_number_system_col: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Compare rows between vendor and system DataFrames row by row.
-    
+
     Returns:
         Dictionary with:
         - "results": List of RowComparisonResult for matched employees
         - "only_in_vendor_count": Count of employees only in vendor
         - "only_in_system_count": Count of employees only in system
-    
-    Args:
-        df_vendor: Vendor paysheet DataFrame
-        df_system: System paysheet DataFrame
-        header_mapping: Dictionary mapping vendor_header -> system_header
-        employee_number_vendor_col: Vendor column name for employee number (auto-detect if None)
-        employee_number_system_col: System column name for employee number (auto-detect if None)
-        
-    Returns:
-        List of RowComparisonResult objects
+
+    header_mapping: Keys are tuples of vendor header names; values are either system_header (str)
+    or dict with "system_header" and "formula_steps". When formula_steps is present, vendor value
+    is computed by applying each step's operator (+, -, *, /).
     """
     # Auto-detect employee number columns if not provided
     if not employee_number_vendor_col:
@@ -229,12 +311,15 @@ def compare_rows(
             if "employee" in col_normalized and ("number" in col_normalized or "id" in col_normalized):
                 employee_number_vendor_col = col
                 break
-    
+
     if not employee_number_system_col:
-        # Try to find from header mapping first
-        if employee_number_vendor_col and employee_number_vendor_col in header_mapping:
-            employee_number_system_col = header_mapping[employee_number_vendor_col]
-        else:
+        # Resolve from header mapping (keys are tuples)
+        for vendor_key, mapping_value in header_mapping.items():
+            keys_iter = vendor_key if isinstance(vendor_key, tuple) else (vendor_key,)
+            if employee_number_vendor_col in keys_iter:
+                employee_number_system_col = _mapping_system_col(mapping_value)
+                break
+        if not employee_number_system_col:
             for col in df_system.columns:
                 col_normalized = normalize_for_comparison(col)
                 if "employee" in col_normalized and ("number" in col_normalized or "id" in col_normalized):
@@ -306,56 +391,39 @@ def compare_rows(
         column_comparisons.append(emp_num_comp)
         
         # Compare each mapped column
-        for vendor_col_key, system_col in header_mapping.items():
-            # Handle both single column (str) and multiple columns (tuple)
-            is_multi_column = isinstance(vendor_col_key, tuple)
-            
-            if is_multi_column:
-                # Multiple vendor columns - sum them
-                vendor_cols = list(vendor_col_key)
-                vendor_val = None
+        for vendor_col_key, mapping_value in header_mapping.items():
+            system_col = _mapping_system_col(mapping_value)
+            formula_steps = None
+            if isinstance(mapping_value, dict):
+                formula_steps = mapping_value.get("formula_steps") or mapping_value.get("formulaSteps")
+            vendor_cols = list(vendor_col_key) if isinstance(vendor_col_key, tuple) else [vendor_col_key]
+            vendor_cols_exist = all(col in df_vendor.columns for col in vendor_cols)
+
+            if formula_steps and len(formula_steps) > 0:
+                vendor_val = _evaluate_formula_steps(formula_steps, vendor_row)
+            elif len(vendor_cols) == 1:
+                col = vendor_cols[0]
+                vendor_val = vendor_row[col] if (vendor_cols_exist and col in vendor_row.index) else None
+            else:
                 vendor_values = []
-                
-                # Sum all vendor columns
                 for col in vendor_cols:
-                    if col in df_vendor.columns and col in vendor_row.index:
+                    if col in vendor_row.index:
                         val = vendor_row[col]
                         if val is not None and not pd.isna(val):
                             try:
                                 vendor_values.append(float(val))
                             except (ValueError, TypeError):
                                 pass
-                
-                if vendor_values:
-                    vendor_val = sum(vendor_values)
-                else:
-                    vendor_val = None
-                
-                # Check if any vendor columns exist
-                vendor_cols_exist = any(col in df_vendor.columns for col in vendor_cols)
-            else:
-                # Single vendor column (backward compatible)
-                vendor_col = vendor_col_key
-                vendor_cols = [vendor_col]
-                vendor_cols_exist = vendor_col in df_vendor.columns
-                
-                if vendor_cols_exist and vendor_col in vendor_row.index:
-                    vendor_val = vendor_row[vendor_col]
-                else:
-                    vendor_val = None
-            
+                vendor_val = sum(vendor_values) if vendor_values else None
+
             # Skip employee number column if it's in the mapping (already added manually)
             system_col_normalized = normalize_for_comparison(system_col)
             emp_vendor_normalized = normalize_for_comparison(employee_number_vendor_col)
             emp_system_normalized = normalize_for_comparison(employee_number_system_col)
             
-            # Check if any vendor column matches employee number (for multi-column case)
-            if is_multi_column:
-                vendor_cols_normalized = [normalize_for_comparison(col) for col in vendor_cols]
-                skip_employee = any(vc_norm == emp_vendor_normalized for vc_norm in vendor_cols_normalized)
-            else:
-                vendor_col_normalized = normalize_for_comparison(vendor_col_key)
-                skip_employee = vendor_col_normalized == emp_vendor_normalized
+            # Skip if this mapping is for the employee number column (already added manually)
+            vendor_cols_normalized = [normalize_for_comparison(col) for col in vendor_cols]
+            skip_employee = any(vc_norm == emp_vendor_normalized for vc_norm in vendor_cols_normalized)
             
             if (skip_employee or system_col_normalized == emp_system_normalized):
                 continue

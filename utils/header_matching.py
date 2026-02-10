@@ -9,7 +9,7 @@ from config import (
     AZURE_DEPLOYMENT_NAME, AZURE_ENDPOINT, AZURE_API_KEY, AZURE_API_VERSION,
     AZURE_OPENAI_TIMEOUT, AZURE_OPENAI_MAX_RETRIES
 )
-from config import CONSTANT_HEADERS, HEADER_MATCHING_PRIORITY, HEADER_VARIATIONS
+from config import HEADER_MATCHING_PRIORITY, HEADER_VARIATIONS
 import time
 from utils.normalization import normalize_header_name
 from utils.logger import get_logger
@@ -35,22 +35,21 @@ def match_headers_ai(
 ) -> Tuple[Dict[str, str], List[str], List[str], Dict[str, bool]]:
     """
     Match ONLY constant headers between vendor and system DataFrames using AI.
-    Only matches the headers specified in CONSTANT_HEADERS config.
+    Only matches the headers specified in the constant_headers list (from request).
     
     Args:
         df_vendor: Vendor paysheet DataFrame
         df_system: System paysheet DataFrame
-        constant_headers: List of constant headers to match (default: CONSTANT_HEADERS from config)
+        constant_headers: List of constant headers to match (from request constantHeaders)
         
     Returns:
         Tuple of:
         - matched_headers: Dict mapping vendor_header -> system_header (ONLY constant headers)
-        - unmatched_constant_header_names: List of constant header names that couldn't be matched (e.g., ['BASE_VALUE', 'CONTRACTOR'])
+        - unmatched_constant_header_names: List of constant header names that couldn't be matched
         - unmatched_vendor_headers: List of vendor headers that don't match any constant header
         - constant_headers_status: Dict showing which constant headers were matched
     """
-    if constant_headers is None:
-        constant_headers = CONSTANT_HEADERS
+    constant_headers = constant_headers or []
     
     # Get normalized headers (keep original for return)
     vendor_headers_original = [str(col) for col in df_vendor.columns]
@@ -242,43 +241,47 @@ def match_headers_ai(
     return matched_headers, unmatched_constant_header_names, unmatched_vendor_headers, constant_headers_status
 
 
-def _get_semantic_context_for_header(const_header: str) -> str:
-    """
-    Get semantic context/description for a constant header to help AI understand its real-world meaning.
-    """
-    context_map = {
-        "EMPLOYEE_NUMBER": """
+# Optional overrides: only used when you want custom accept/reject rules for specific headers.
+# If a header is not here, generic context (infer from name + synonyms) is used.
+SEMANTIC_CONTEXT_OVERRIDES: Dict[str, str] = {
+    "EMPLOYEE_NUMBER": """
 BUSINESS MEANING: Unique identifier for an employee (e.g., "EMP001", "12345", "10007")
 - This is an IDENTIFIER, not a name
 - Usually text/string (may have leading zeros)
-- Used to uniquely identify employees across systems
 - Examples: "employee_number", "employee_id", "emp_no", "employee_code"
 - REJECT: "employee_name", "employee_name_full" (these are names, not numbers/IDs)
 """,
-        "NET_PAY": """
+    "NET_PAY": """
 BUSINESS MEANING: Employee's take-home pay AFTER all deductions (taxes, insurance, PF, etc.)
-- This is the FINAL amount the employee receives
-- Calculated as: Gross Pay - All Deductions = Net Pay
-- Examples: "net_pay", "netpay", "net_salary", "take_home", "net_amount"
-- REJECT: "gross_pay" (before deductions), "total_payable" (total to be paid, different concept), 
-  "basic_pay" (base component), "total_pay" (could be gross)
-- KEY DISTINCTION: "total_payable" means "total amount that needs to be paid" (could be gross or invoice amount),
-  while "net_pay" means "what employee takes home after deductions" - these are DIFFERENT concepts
+- This is the FINAL amount the employee receives. Examples: "net_pay", "netpay", "take_home", "net_amount"
+- REJECT: "gross_pay", "total_payable", "basic_pay" (different concepts)
 """,
-        "INVOICE_VALUE": """
+    "INVOICE_VALUE": """
 BUSINESS MEANING: The monetary value/amount on an invoice or bill
 - This is the AMOUNT to be paid, not a count or number
 - Examples: "invoice_value", "invoice_amount", "invoice_total", "bill_amount"
-- REJECT: "invoice_number" (ID, not amount), "invoice_count" (quantity, not value), 
-  "invoice_date" (date, not amount)
+- REJECT: "invoice_number" (ID), "invoice_count" (quantity), "invoice_date" (date)
+""",
+}
+
+
+def _get_semantic_context_for_header(const_header: str) -> str:
+    """
+    Get semantic context for a constant header. Uses optional override if present,
+    otherwise returns the generic context (infer meaning from header name + allow synonyms).
+    No config is required for new columns.
+    """
+    if const_header in SEMANTIC_CONTEXT_OVERRIDES:
+        return SEMANTIC_CONTEXT_OVERRIDES[const_header]
+    # Generic context: works for any constant header without hardcoded config
+    return f"""
+BUSINESS MEANING: Infer from the constant header name "{const_header}".
+- In payroll/HR data, this header likely represents a real-world concept (identifier, amount, category, date, etc.)
+- The SAME concept can appear under different names: synonyms or equivalent terms (e.g. different words for the same idea), or different wording
+- MATCH a vendor header to this constant if they represent the SAME business concept, even when the names differ
+- REJECT only when the vendor header clearly means something different (e.g. name vs id, gross vs net)
+- When the constant header name and a vendor header are synonyms or equivalent terms, that is a valid match
 """
-    }
-    
-    return context_map.get(const_header, f"""
-BUSINESS MEANING: {const_header}
-- Analyze what this header represents in real-world payroll/paysheet systems
-- Match only if vendor and system headers represent the same business concept
-""")
 
 
 def _ai_semantic_matching_for_constant_header(
@@ -319,53 +322,37 @@ def _ai_semantic_matching_for_constant_header(
     # Get semantic context for the constant header
     semantic_context = _get_semantic_context_for_header(const_header)
     
-    # Format hints for prompt
+    # Optional hints (from config variations when available); AI must still consider ALL headers
     hints_text = ", ".join(hints) if hints else "None - analyze all headers independently"
+    variations_text = ", ".join(expected_variations) if expected_variations else "None - infer from constant header name"
     
-    # Create a smart prompt that helps AI understand semantic differences
     prompt = f"""
 You are an intelligent data assistant matching column headers for payroll/paysheet data.
-You have access to ALL headers and must autonomously find the best semantic match.
-
-CONTEXT:
-- System paysheet is the SOURCE OF TRUTH with standard column names (constant headers)
-- Vendor paysheets come from different sources with varying naming conventions
-- Your task: Match vendor columns to system's constant headers semantically
+You must find the best semantic match for ONE constant header by analyzing ALL vendor and system headers.
 
 CONSTANT HEADER TO MATCH: "{const_header}"
 
 {semantic_context}
 
-Expected variations for this header: {expected_variations}
+OPTIONAL (use only as hints; you may match a header not listed here):
+- Expected variations: {variations_text}
+- High-confidence hint headers: {hints_text}
 
-HIGH-CONFIDENCE HINTS (from Phase 1 - use as suggestions, not requirements):
-These headers matched hardcoded variations and are likely candidates:
-{hints_text}
-
-ALL AVAILABLE VENDOR HEADERS (analyze ALL of these, not just hints):
+ALL VENDOR HEADERS (you MUST consider every one; match can be any of these):
 {potential_vendor}
 
-ALL AVAILABLE SYSTEM HEADERS (analyze ALL of these):
+ALL SYSTEM HEADERS (pick the system header that best corresponds to the constant "{const_header}"):
 {potential_system}
 
-MATCHING STRATEGY:
-1. Consider hints as likely candidates, but analyze ALL headers independently
-2. Understand business meaning, not just keywords
-3. System headers are standard - vendor headers may vary significantly
-4. Pick the BEST semantic match, even if not in hints
-5. Reject matches that don't make business sense, even if keywords overlap
+RULES:
+1. Infer the business meaning of "{const_header}" from its name and the guidance above
+2. Same concept can have different names (synonyms or equivalent terms); match when vendor and constant mean the same thing
+3. Match a vendor header to this constant if they represent the SAME business concept; the vendor header may not be in expected variations or hints
+4. Return the system header that corresponds to this constant (often the constant itself or a normalized form)
+5. Reject only when the vendor header clearly means something different
+6. When unsure, return {{}} (empty object)
 
-CORE PRINCIPLES:
-1. Match ONLY if vendor and system headers represent the SAME business concept
-2. Use the BUSINESS MEANING above - it tells you what to accept and reject
-3. When in doubt, REJECT - return {{}} (empty object)
-4. Better to require manual mapping than create incorrect matches
-
-⚠️ Return output as JSON only, in this format:
-{{"vendor_header": "system_header"}} or {{}} if no good match
-
-IMPORTANT: The semantic context above already specifies what to accept/reject for "{const_header}".
-Follow those guidelines. If you're unsure, return {{}} (empty object).
+Return JSON only: {{"vendor_header": "system_header"}} for one match, or {{}} if no good match.
 """
     
     # Retry logic with exponential backoff for timeout errors

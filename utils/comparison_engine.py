@@ -8,10 +8,15 @@ from utils.normalization import (
     normalize_text_value,
     normalize_column_name_for_check,
     normalize_for_comparison,
+    normalize_header_name,
 )
 from utils.logger import get_logger
 
 logger = get_logger("comparison_engine")
+
+# System paysheet always uses EMPLOYEE_NUMBER; no variations.
+# Use normalize_header_name so "employee_number", "employeenumber", "EMPLOYEE_NUMBER" all match.
+_SYSTEM_EMPLOYEE_NUMBER_NORMALIZED = normalize_header_name("EMPLOYEE_NUMBER")
 
 
 def format_column_name(column_name: str) -> str:
@@ -299,19 +304,48 @@ def compare_rows(
     or dict with "system_header" and "formula_steps". When formula_steps is present, vendor value
     is computed by applying each step's operator (+, -, *, /).
     """
-    # Auto-detect employee number columns if not provided
-    if not employee_number_vendor_col:
-        for col in df_vendor.columns:
-            col_normalized = normalize_for_comparison(col)
-            if "employee" in col_normalized and ("number" in col_normalized or "id" in col_normalized):
-                employee_number_vendor_col = col
-                break
+    # Resolve employee number columns from matchedVendorData when header check is false.
+    # Vendor employee number = whatever is mapped to systemColumn "employee_number"; no name-pattern fallback.
+    # System paysheet always has EMPLOYEE_NUMBER.
+    if not employee_number_vendor_col or not employee_number_system_col:
+        for vendor_key, mapping_value in header_mapping.items():
+            system_col = _mapping_system_col(mapping_value)
+            if not system_col:
+                continue
+            if normalize_header_name(system_col) == _SYSTEM_EMPLOYEE_NUMBER_NORMALIZED:
+                if not employee_number_system_col:
+                    employee_number_system_col = system_col
+                if not employee_number_vendor_col:
+                    keys_iter = vendor_key if isinstance(vendor_key, tuple) else (vendor_key,)
+                    for vcol in keys_iter:
+                        if vcol in df_vendor.columns:
+                            employee_number_vendor_col = vcol
+                            break
+                if employee_number_vendor_col and employee_number_system_col:
+                    break
 
+    # Require vendor employee column from mapping (matchedVendorData must include systemColumn employee_number)
+    if not employee_number_vendor_col and header_mapping:
+        # Check if mapping for EMPLOYEE_NUMBER existed but vendor columns were not found in data
+        has_emp_mapping = any(
+            normalize_header_name(_mapping_system_col(mapping_value)) == _SYSTEM_EMPLOYEE_NUMBER_NORMALIZED
+            for mapping_value in header_mapping.values()
+        )
+        if has_emp_mapping:
+            raise ValueError(
+                "The vendor column(s) mapped to systemColumn 'EMPLOYEE_NUMBER' in matchedVendorData "
+                "were not found in the vendor paysheet. Check mappedVendorHeaders match the actual column names."
+            )
+        raise ValueError(
+            "matchedVendorData must include a mapping for systemColumn 'EMPLOYEE_NUMBER' / 'employee_number' "
+            "so the vendor employee number column can be determined."
+        )
+
+    # Fallback: resolve system employee column from mapping (by vendor col) or by name pattern
     if not employee_number_system_col:
-        # Resolve from header mapping (keys are tuples)
         for vendor_key, mapping_value in header_mapping.items():
             keys_iter = vendor_key if isinstance(vendor_key, tuple) else (vendor_key,)
-            if employee_number_vendor_col in keys_iter:
+            if employee_number_vendor_col and employee_number_vendor_col in keys_iter:
                 employee_number_system_col = _mapping_system_col(mapping_value)
                 break
         if not employee_number_system_col:

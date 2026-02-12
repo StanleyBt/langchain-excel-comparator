@@ -125,6 +125,9 @@ def match_headers_ai(
                 if ai_selected:
                     for vendor_h, system_h in ai_selected.items():
                         if vendor_h not in matched_headers:
+                            # For EMPLOYEE_NUMBER, reject wrong matches (e.g. employee_pf, employee_esi)
+                            if const_header == "EMPLOYEE_NUMBER" and not _is_valid_employee_number_vendor_match(vendor_h):
+                                continue
                             matched_headers[vendor_h] = system_h
                             constant_headers_status[const_header] = True
                             matched = True
@@ -192,8 +195,9 @@ def match_headers_ai(
                     # Use AI's match if it found one
                     if ai_matches:
                         for vendor_h, system_h in ai_matches.items():
-                            # Only use if vendor header not already matched
                             if vendor_h not in matched_headers:
+                                if const_header == "EMPLOYEE_NUMBER" and not _is_valid_employee_number_vendor_match(vendor_h):
+                                    continue
                                 matched_headers[vendor_h] = system_h
                                 constant_headers_status[const_header] = True
                                 matched = True
@@ -230,15 +234,51 @@ def match_headers_ai(
     return matched_headers, unmatched_constant_header_names, unmatched_vendor_headers, constant_headers_status
 
 
+# For EMPLOYEE_NUMBER: reject vendor headers that are clearly not identifiers (even if AI returned them).
+_EMPLOYEE_NUMBER_REJECT_SUBSTRINGS = (
+    "pf", "esi", "esic", "lwf", "pt_amount", "pt_", "ctc", "name", "arrear", "employer_",
+    "contribution", "deduction", "allowance", "da", "hra", "basic", "gross", "payable",
+    "mobile_charge", "canteen", "uniform", "transport", "bonus", "conveyance", "night_shift",
+    "statutory", "compounding", "service_charge", "attendance_bonus", "holiday_days_amount",
+)
+# Vendor header must suggest identifier (number/id/no/code) to be valid for EMPLOYEE_NUMBER.
+_EMPLOYEE_NUMBER_REQUIRE_ONE_OF = ("number", "id", "no", "code", "num")
+
+
+def _is_valid_employee_number_vendor_match(vendor_header: str) -> bool:
+    """
+    Return False if vendor_header is clearly not an employee identifier (e.g. employee_pf, employee_esi).
+    Used to reject wrong AI matches for EMPLOYEE_NUMBER.
+    """
+    if not vendor_header:
+        return False
+    v = str(vendor_header).strip().lower().replace(" ", "_")
+    # Reject if it contains any known non-identifier concept
+    for sub in _EMPLOYEE_NUMBER_REJECT_SUBSTRINGS:
+        if sub in v:
+            return False
+    # Require at least one identifier-like keyword (number, id, no, code)
+    for kw in _EMPLOYEE_NUMBER_REQUIRE_ONE_OF:
+        if kw in v:
+            return True
+    # Allow "casper_id" / "emp_id" style (id is in _REQUIRE_ONE_OF). Also allow exact variation names.
+    if v in ("employee_number", "employee_id", "employeenumber", "employeeid", "employee_no", "employeeno", "emp_no", "emp_id", "employee_code", "casper_id"):
+        return True
+    return False
+
+
 # Optional overrides: only used when you want custom accept/reject rules for specific headers.
 # If a header is not here, generic context (infer from name + synonyms) is used.
 SEMANTIC_CONTEXT_OVERRIDES: Dict[str, str] = {
     "EMPLOYEE_NUMBER": """
 BUSINESS MEANING: Unique identifier for an employee (e.g., "EMP001", "12345", "10007")
-- This is an IDENTIFIER, not a name
-- Usually text/string (may have leading zeros)
-- Examples: "employee_number", "employee_id", "emp_no", "employee_code"
-- REJECT: "employee_name", "employee_name_full" (these are names, not numbers/IDs)
+- This is an IDENTIFIER only: a code/number that uniquely identifies the person, not a name or any amount/deduction
+- Usually text/string (may have leading zeros). Column holds values like employee IDs, not money or percentages
+- MATCH only: "employee_number", "employee_id", "emp_no", "employee_code", "casper_id", "emp_id" (identifier-like names)
+- REJECT: "employee_name", "employee_name_full" (these are names, not IDs)
+- REJECT: "employee_pf", "employee_esic", "employee_lwf", "employer_pf", "employer_esic", "employer_lwf" (these are contribution/deduction amounts, NOT identifiers)
+- REJECT: Any header that is clearly a deduction, contribution, or amount (pf, esi, lwf, pt, ctc, da, hra, allowance, etc.). EMPLOYEE_NUMBER must be the ID column only.
+- If the only candidate vendor headers are things like employee_pf, employee_esi, etc., return {{}} (empty) - do NOT match. No match is better than a wrong match.
 """,
     "NET_PAY": """
 BUSINESS MEANING: Employee's take-home pay AFTER all deductions (taxes, insurance, PF, etc.)

@@ -163,12 +163,13 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
             matched_count = sum(1 for status in constant_headers_status.values() if status)
             total_count = len(constant_headers_status)
             
+            all_vendor_headers = [str(col) for col in df_vendor.columns]
             response = HeaderMatchingResponse(
                 matchedHeaders=matched_headers_list,
                 unmatchedConstantHeaders=unmatched_constant_header_names,
-                unmatchedVendorHeaders=unmatched_vendor_headers,
+                unmatchedVendorHeaders=all_vendor_headers,
                 constantHeadersStatus=constant_headers_status,
-                message=f"Constant headers matching completed. {matched_count}/{total_count} constant headers matched. {len(unmatched_vendor_headers)} vendor headers available for manual mapping.",
+                message=f"Constant headers matching completed. {matched_count}/{total_count} constant headers matched. {len(all_vendor_headers)} vendor headers.",
                 month=request.month,
                 processingStage=request.processingStage,
                 year=request.year,

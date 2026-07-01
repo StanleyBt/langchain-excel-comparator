@@ -21,34 +21,25 @@ def match_headers_ai(
     df_vendor: pd.DataFrame, 
     df_system: pd.DataFrame,
     constant_headers: Optional[List[str]] = None
-) -> Tuple[Dict[str, str], List[str], List[str], Dict[str, bool]]:
+) -> Tuple[Dict[str, str], List[str], Dict[str, bool], Optional[Dict[str, int]]]:
     """
     Match ONLY constant headers between vendor and system DataFrames using AI.
     Only matches the headers specified in the constant_headers list (from request).
-    
-    Args:
-        df_vendor: Vendor paysheet DataFrame
-        df_system: System paysheet DataFrame
-        constant_headers: List of constant headers to match (from request constantHeaders)
-        
+
     Returns:
-        Tuple of:
-        - matched_headers: Dict mapping vendor_header -> system_header (ONLY constant headers)
-        - unmatched_constant_header_names: List of constant header names that couldn't be matched
-        - unmatched_vendor_headers: List of vendor headers that don't match any constant header
-        - constant_headers_status: Dict showing which constant headers were matched
+        Tuple of (matched_headers, unmatched_constant_header_names, constant_headers_status, token_usage).
+        token_usage: {"input_tokens": int, "output_tokens": int} or None (for logging only, not in API response).
     """
     constant_headers = constant_headers or []
-    
-    # Get normalized headers (keep original for return)
-    vendor_headers_original = [str(col) for col in df_vendor.columns]
-    # Headers are already normalized to lowercase in data_processor
+
     vendor_headers = [str(col).strip().lower() for col in df_vendor.columns]
     system_headers = [str(col).strip().lower() for col in df_system.columns]
-    
+
     matched_headers = {}
     constant_headers_status = {}
     unmatched_constant_header_names = []
+    total_input_tokens = 0
+    total_output_tokens = 0
     
     # Get variations and priority from config
     constant_mapping_variations = HEADER_VARIATIONS
@@ -115,13 +106,16 @@ def match_headers_ai(
         if all_vendor_headers and all_system_headers:
             try:
                 ai_was_called = True
-                ai_selected = _ai_semantic_matching_for_constant_header(
-                    const_header, 
-                    all_vendor_headers,  # ALL headers, not filtered
-                    all_system_headers,  # ALL headers
+                ai_selected, usage = _ai_semantic_matching_for_constant_header(
+                    const_header,
+                    all_vendor_headers,
+                    all_system_headers,
                     variations,
-                    hints=hint_list  # Pass hints as suggestions
+                    hints=hint_list
                 )
+                if usage:
+                    total_input_tokens += usage.get("input_tokens", 0)
+                    total_output_tokens += usage.get("output_tokens", 0)
                 if ai_selected:
                     for vendor_h, system_h in ai_selected.items():
                         if vendor_h not in matched_headers:
@@ -140,9 +134,15 @@ def match_headers_ai(
                 is_timeout = "timeout" in error_str or "timed out" in error_str
                 
                 if is_timeout:
-                    print(f"⚠️  Warning: AI request timed out after {AZURE_OPENAI_TIMEOUT}s (with {AZURE_OPENAI_MAX_RETRIES} retries). Falling back to priority-based matching.")
+                    logger.warning(
+                        "AI request timed out, falling back to priority-based matching",
+                        extra={"timeout": AZURE_OPENAI_TIMEOUT, "retries": AZURE_OPENAI_MAX_RETRIES, "constant_header": const_header}
+                    )
                 else:
-                    print(f"⚠️  Warning: AI validation failed, falling back to priority-based matching: {e}")
+                    logger.warning(
+                        "AI validation failed, falling back to priority-based matching",
+                        extra={"error": str(e)[:200], "constant_header": const_header}
+                    )
                 # AI service failed, but we'll still try fallback
         
         # Phase 3: Fallback direct matching - Only if AI service failed (exception)
@@ -189,10 +189,12 @@ def match_headers_ai(
             hint_list = [h[0] for h in high_confidence_hints[:5]] if high_confidence_hints else None
             if potential_vendor and potential_system:
                 try:
-                    ai_matches = _ai_semantic_matching_for_constant_header(
+                    ai_matches, usage = _ai_semantic_matching_for_constant_header(
                         const_header, potential_vendor, potential_system, variations, hints=hint_list
                     )
-                    # Use AI's match if it found one
+                    if usage:
+                        total_input_tokens += usage.get("input_tokens", 0)
+                        total_output_tokens += usage.get("output_tokens", 0)
                     if ai_matches:
                         for vendor_h, system_h in ai_matches.items():
                             if vendor_h not in matched_headers:
@@ -219,19 +221,13 @@ def match_headers_ai(
         
         if not matched:
             constant_headers_status[const_header] = False
-            # Add the constant header name to unmatched list
             unmatched_constant_header_names.append(const_header)
-    
-    # Find all vendor headers that weren't matched to any constant header
-    matched_vendor_headers_lower = set(matched_headers.keys())
-    unmatched_vendor_headers = []
-    
-    for i, vendor_header_lower in enumerate(vendor_headers):
-        if vendor_header_lower not in matched_vendor_headers_lower:
-            # Return original header name (not normalized)
-            unmatched_vendor_headers.append(vendor_headers_original[i])
-    
-    return matched_headers, unmatched_constant_header_names, unmatched_vendor_headers, constant_headers_status
+
+    token_usage = (
+        {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
+        if (total_input_tokens or total_output_tokens) else None
+    )
+    return matched_headers, unmatched_constant_header_names, constant_headers_status, token_usage
 
 
 # For EMPLOYEE_NUMBER: reject vendor headers that are clearly not identifiers (even if AI returned them).
@@ -333,10 +329,15 @@ def _ai_semantic_matching_for_constant_header(
         hints: Optional list of high-confidence header hints from Phase 1 (suggestions, not requirements)
         
     Returns:
-        Dictionary mapping vendor_header -> system_header (only if AI finds a good semantic match)
+        Tuple of (matches_dict, usage_dict).
+        usage_dict: {"input_tokens": int, "output_tokens": int} or None.
     """
     if not potential_vendor or not potential_system:
-        return {}
+        return {}, None
+    
+    # Use sorted copies so the prompt is identical for the same set of headers (deterministic AI behavior)
+    potential_vendor = sorted(potential_vendor)
+    potential_system = sorted(potential_system)
     
     llm = AzureChatOpenAI(
         deployment_name=AZURE_DEPLOYMENT_NAME,
@@ -352,7 +353,8 @@ def _ai_semantic_matching_for_constant_header(
     semantic_context = _get_semantic_context_for_header(const_header)
     
     # Optional hints (from config variations when available); AI must still consider ALL headers
-    hints_text = ", ".join(hints) if hints else "None - analyze all headers independently"
+    # Sort hints so prompt is deterministic for same inputs
+    hints_text = ", ".join(sorted(hints)) if hints else "None - analyze all headers independently"
     variations_text = ", ".join(expected_variations) if expected_variations else "None - infer from constant header name"
     
     prompt = f"""
@@ -386,10 +388,21 @@ Return JSON only: {{"vendor_header": "system_header"}} for one match, or {{}} if
     
     # Retry logic with exponential backoff for timeout errors
     last_error = None
+    usage_out = None
     for attempt in range(AZURE_OPENAI_MAX_RETRIES + 1):
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             raw_output = response.content
+            um = getattr(response, "usage_metadata", None) or (getattr(response, "response_metadata", None) or {}).get("usage_metadata")
+            if um is not None:
+                usage_out = {
+                    "input_tokens": getattr(um, "input_tokens", None) if not isinstance(um, dict) else um.get("input_tokens"),
+                    "output_tokens": getattr(um, "output_tokens", None) if not isinstance(um, dict) else um.get("output_tokens"),
+                }
+                if usage_out["input_tokens"] is None:
+                    usage_out["input_tokens"] = 0
+                if usage_out["output_tokens"] is None:
+                    usage_out["output_tokens"] = 0
             break  # Success, exit retry loop
         except Exception as e:
             last_error = e
@@ -424,12 +437,12 @@ Return JSON only: {{"vendor_header": "system_header"}} for one match, or {{}} if
         if match:
             semantic_matches = json.loads(match.group())
         else:
-            return {}
-    
-    # Filter out null/None values and "no match" strings
-    return {
-        k: v for k, v in semantic_matches.items() 
+            return {}, usage_out
+
+    result = {
+        k: v for k, v in semantic_matches.items()
         if v and str(v).lower() not in ["null", "none", "no match", ""]
     }
+    return result, usage_out
 
 

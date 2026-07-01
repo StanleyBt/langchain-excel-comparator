@@ -24,6 +24,22 @@ AZURE_OPENAI_TIMEOUT = int(os.getenv("AZURE_OPENAI_TIMEOUT", "60"))
 # Number of retries for timeout errors (with exponential backoff)
 AZURE_OPENAI_MAX_RETRIES = int(os.getenv("AZURE_OPENAI_MAX_RETRIES", "2"))
 
+# Token pricing for internal tracking (optional; only affects logs, not API response)
+# USD per 1,000 tokens. Set to enable estimated_cost_usd in "AI token usage" logs.
+_AZURE_PRICE_INPUT = os.getenv("AZURE_OPENAI_PRICE_PER_1K_INPUT", "").strip()
+_AZURE_PRICE_OUTPUT = os.getenv("AZURE_OPENAI_PRICE_PER_1K_OUTPUT", "").strip()
+AZURE_OPENAI_PRICE_PER_1K_INPUT: Optional[float] = float(_AZURE_PRICE_INPUT) if _AZURE_PRICE_INPUT else None
+AZURE_OPENAI_PRICE_PER_1K_OUTPUT: Optional[float] = float(_AZURE_PRICE_OUTPUT) if _AZURE_PRICE_OUTPUT else None
+
+
+def compute_token_cost(input_tokens: int, output_tokens: int) -> Optional[float]:
+    """Compute estimated cost in USD. Returns None if pricing not configured."""
+    if AZURE_OPENAI_PRICE_PER_1K_INPUT is None or AZURE_OPENAI_PRICE_PER_1K_OUTPUT is None:
+        return None
+    in_cost = (input_tokens / 1000.0) * AZURE_OPENAI_PRICE_PER_1K_INPUT
+    out_cost = (output_tokens / 1000.0) * AZURE_OPENAI_PRICE_PER_1K_OUTPUT
+    return round(in_cost + out_cost, 6)
+
 # Logging configuration
 # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -31,6 +47,12 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_JSON = os.getenv("LOG_JSON", "true").lower() == "true"
 # Optional log file path
 LOG_FILE = os.getenv("LOG_FILE", None)
+
+# CORS: allowed origins for browser requests (production)
+# Comma-separated list, e.g. "https://app.example.com,https://admin.example.com"
+# If empty or not set, defaults to ["*"] (allow all) for development.
+_CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "").strip()
+CORS_ORIGINS: List[str] = [o.strip() for o in _CORS_ORIGINS_STR.split(",") if o.strip()] if _CORS_ORIGINS_STR else ["*"]
 
 # ============================================================================
 # COLUMNS TO CHECK (single source of truth)
@@ -82,7 +104,6 @@ CONSTANT_HEADER_CONFIG: List[Dict] = [
 ]
 
 # Derived from CONSTANT_HEADER_CONFIG (do not edit these directly)
-CONSTANT_HEADERS: List[str] = [c["name"] for c in CONSTANT_HEADER_CONFIG]
 HEADER_VARIATIONS: Dict[str, List[str]] = {c["name"]: c["variations"] for c in CONSTANT_HEADER_CONFIG}
 HEADER_MATCHING_PRIORITY: Dict[str, List[List[str]]] = {c["name"]: c["priority_keywords"] for c in CONSTANT_HEADER_CONFIG}
 TEXT_ONLY_CONSTANT_HEADERS: set = {c["name"] for c in CONSTANT_HEADER_CONFIG if c.get("text_only", False)}

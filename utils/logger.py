@@ -13,7 +13,6 @@ import json
 import sys
 from typing import Any, Dict, Optional
 from datetime import datetime
-import uuid
 
 
 class SensitiveDataMasker:
@@ -79,36 +78,34 @@ class SensitiveDataMasker:
         
         return value
     
+# LogRecord internals — never emit as top-level JSON fields
+_STANDARD_RECORD_ATTRS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys()
+)
+
+
 class StructuredFormatter(logging.Formatter):
-    """JSON formatter for structured logging"""
-    
+    """Compact JSON formatter for structured logging"""
+
     def format(self, record: logging.LogRecord) -> str:
-        """Format log record as JSON"""
         log_data = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "time": datetime.utcnow().strftime("%H:%M:%S"),
             "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            "module": record.module,
-            "function": record.funcName,
-            "line": record.lineno,
+            "msg": record.getMessage(),
         }
-        
-        # Add correlation ID if present
-        if hasattr(record, 'correlation_id'):
-            log_data["correlation_id"] = record.correlation_id
-        
-        # Add exception info if present
+
+        if hasattr(record, "correlation_id"):
+            log_data["cid"] = record.correlation_id
+
         if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
-        
-        # Add extra fields
-        if hasattr(record, 'extra_data'):
-            # Mask sensitive data from extra fields
-            masker = SensitiveDataMasker()
-            log_data["extra"] = masker.mask_value(record.extra_data)
-        
-        return json.dumps(log_data, default=str)
+            log_data["error"] = self.formatException(record.exc_info)
+
+        masker = SensitiveDataMasker()
+        for key, value in record.__dict__.items():
+            if key not in _STANDARD_RECORD_ATTRS and key != "correlation_id":
+                log_data[key] = masker.mask_value(value, key)
+
+        return json.dumps(log_data, default=str, separators=(",", ":"))
 
 
 def setup_logging(

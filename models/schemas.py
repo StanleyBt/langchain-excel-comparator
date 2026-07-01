@@ -75,7 +75,10 @@ class HeaderMatchingResponse(BaseModel):
     """Response model for header matching endpoint"""
     matchedHeaders: List[HeaderMatch] = Field(..., description="List of successfully matched constant headers")
     unmatchedConstantHeaders: List[str] = Field(..., description="List of constant header names that couldn't be matched (e.g., ['BASE_VALUE', 'CONTRACTOR'])")
-    unmatchedVendorHeaders: List[str] = Field(..., description="List of ALL vendor paysheet headers (full column list from vendor data)")
+    unmatchedVendorHeaders: List[str] = Field(
+        ...,
+        description="All vendor paysheet headers from vendorPaysheetData plus 'Not Applicable', sorted alphabetically",
+    )
     constantHeadersStatus: Dict[str, bool] = Field(..., description="Status of constant headers matching")
     message: Optional[str] = None
     month: Optional[int] = Field(None, description="Month from request")

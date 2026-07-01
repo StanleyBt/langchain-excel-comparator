@@ -1,8 +1,37 @@
 # utils/helpers.py
 """Helper functions for common operations"""
 import pandas as pd
-from typing import Dict, Union, Tuple, Any
+from typing import Dict, Union, Tuple, Any, List
 from utils.normalization import normalize_header_name
+
+NOT_APPLICABLE = "Not Applicable"
+
+
+def _normalize_not_applicable(value: str) -> str:
+    return " ".join(str(value).strip().lower().split())
+
+
+def is_not_applicable_mapping(mapped_vendor_headers: List[str]) -> bool:
+    """True when mapping is explicitly 'Not Applicable' (skip comparison for this system column)."""
+    if not mapped_vendor_headers:
+        return False
+    return all(
+        _normalize_not_applicable(h) == _normalize_not_applicable(NOT_APPLICABLE)
+        for h in mapped_vendor_headers
+    )
+
+
+def is_not_applicable_item(status: Any, mapped_vendor_headers: List[str]) -> bool:
+    if status and _normalize_not_applicable(str(status)) == _normalize_not_applicable(NOT_APPLICABLE):
+        return True
+    return is_not_applicable_mapping(mapped_vendor_headers)
+
+
+def build_unmatched_vendor_header_list(vendor_data: List[Dict[str, Any]]) -> List[str]:
+    """All unique vendor column names from vendorPaysheetData plus 'Not Applicable', sorted A–Z."""
+    headers = {str(k) for row in vendor_data for k in row.keys()}
+    headers.add(NOT_APPLICABLE)
+    return sorted(headers, key=lambda h: h.casefold())
 
 
 def _mapping_system_header(value: Any) -> str:

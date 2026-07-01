@@ -16,7 +16,7 @@ from models.schemas import (
 from utils.data_processor import system_json_to_dataframe, vendor_json_to_dataframe
 from utils.header_matching import match_headers_ai
 from utils.comparison_engine import compare_rows
-from utils.helpers import normalize_header_mapping
+from utils.helpers import normalize_header_mapping, build_unmatched_vendor_header_list, is_not_applicable_item
 from config import LOG_LEVEL, LOG_JSON, LOG_FILE, CORS_ORIGINS, compute_token_cost
 from utils.logger import setup_logging, get_logger
 
@@ -180,13 +180,13 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
             matched_count = sum(1 for status in constant_headers_status.values() if status)
             total_count = len(constant_headers_status)
             
-            all_vendor_headers = [str(col) for col in df_vendor.columns]
+            unmatched_vendor_headers = build_unmatched_vendor_header_list(request.vendorPaysheetData)
             response = HeaderMatchingResponse(
                 matchedHeaders=matched_headers_list,
                 unmatchedConstantHeaders=unmatched_constant_header_names,
-                unmatchedVendorHeaders=all_vendor_headers,
+                unmatchedVendorHeaders=unmatched_vendor_headers,
                 constantHeadersStatus=constant_headers_status,
-                message=f"Constant headers matching completed. {matched_count}/{total_count} constant headers matched. {len(all_vendor_headers)} vendor headers.",
+                message=f"Constant headers matching completed. {matched_count}/{total_count} constant headers matched. {len(unmatched_vendor_headers)} vendor headers.",
                 month=request.month,
                 processingStage=request.processingStage,
                 year=request.year,
@@ -215,6 +215,8 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
             header_mapping = {}
             if request.matchedVendorData:
                 for item in request.matchedVendorData:
+                    if is_not_applicable_item(item.status, item.mappedVendorHeaders):
+                        continue
                     vendor_headers_tuple = tuple(item.mappedVendorHeaders)
                     mapping_value = {
                         "system_header": item.systemColumn,
@@ -225,7 +227,7 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
             if not header_mapping:
                 raise HTTPException(
                     status_code=400,
-                    detail="No valid header mappings found in matchedVendorData. Cannot perform comparison."
+                    detail="No valid header mappings found in matchedVendorData (all columns may be 'Not Applicable'). At least one mapped column is required for comparison.",
                 )
             
             # Normalize header mapping to match DataFrame column names

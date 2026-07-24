@@ -36,6 +36,7 @@ def match_headers_ai(
     system_headers = [str(col).strip().lower() for col in df_system.columns]
 
     matched_headers = {}
+    used_system_headers = set()  # normalized — each system column can only be matched once
     constant_headers_status = {}
     unmatched_constant_header_names = []
     total_input_tokens = 0
@@ -44,66 +45,117 @@ def match_headers_ai(
     # Get variations and priority from config
     constant_mapping_variations = HEADER_VARIATIONS
     priority_keywords = HEADER_MATCHING_PRIORITY
+
+    def _system_key(system_header: str) -> str:
+        return normalize_header_name(system_header, for_matching=True)
+
+    def _accept_match(vendor_h: str, system_h: str, const_header: str) -> bool:
+        """Accept at most one vendor→system pair; system column must be unused."""
+        if vendor_h in matched_headers:
+            return False
+        sys_key = _system_key(system_h)
+        if sys_key in used_system_headers:
+            return False
+        if const_header == "EMPLOYEE_NUMBER" and not _is_valid_employee_number_vendor_match(vendor_h):
+            return False
+        matched_headers[vendor_h] = system_h
+        used_system_headers.add(sys_key)
+        constant_headers_status[const_header] = True
+        return True
     
-    # Step 1: Match ONLY constant headers
+    # Step 1: Match ONLY constant headers (exactly one vendor column per constant / system header)
     for const_header in constant_headers:
         const_normalized = normalize_header_name(const_header, for_matching=True)
         matched = False
         
         # Get variations ordered by priority
         variations = constant_mapping_variations.get(const_header, [const_normalized])
+        # Always include the constant's own normalized name as a variation
+        if const_normalized not in variations:
+            variations = [const_normalized] + list(variations)
         
         # Phase 1: Create hints from variations (suggestions, not filters)
-        # These hints help AI prioritize, but AI will analyze ALL headers
         high_confidence_hints = []  # List of (vendor_header, priority_score)
         
         for vendor_header in vendor_headers:
+            if vendor_header in matched_headers:
+                continue
             vendor_norm = normalize_header_name(vendor_header, for_matching=True)
             
-            # Check if vendor header matches any variation (for hint generation)
             matches_variation = False
             for variation in variations:
-                if variation in vendor_norm or vendor_norm in variation:
+                var_norm = normalize_header_name(variation, for_matching=True)
+                if var_norm == vendor_norm or var_norm in vendor_norm or vendor_norm in var_norm:
                     matches_variation = True
                     break
             
             if matches_variation:
-                # Calculate priority score based on keywords
-                priority_score = 999  # Default low priority
+                priority_score = 999
                 if const_header in priority_keywords and priority_keywords[const_header]:
-                    # Use configured priority keywords
                     for priority, keyword_list in enumerate(priority_keywords[const_header]):
-                        # Check if vendor header contains all keywords in this priority level
                         if all(keyword in vendor_norm for keyword in keyword_list):
-                            priority_score = priority  # Lower number = higher priority
+                            priority_score = priority
                             break
                 
-                # If no priority match found, use variation order as fallback
                 if priority_score == 999:
                     for priority, variation in enumerate(variations):
-                        if variation in vendor_norm or vendor_norm in variation:
+                        var_norm = normalize_header_name(variation, for_matching=True)
+                        if var_norm == vendor_norm or var_norm in vendor_norm or vendor_norm in var_norm:
                             priority_score = priority
                             break
                 
                 high_confidence_hints.append((vendor_header, priority_score))
         
-        # Sort hints by priority (lower number = better match)
         high_confidence_hints.sort(key=lambda x: x[1])
+
+        # Phase 1.5: Exact / near-exact match first (one vendor + one unused system column)
+        # Prefer vendor name == system name == constant (e.g. da → da for constant DA)
+        available_system = [sh for sh in system_headers if _system_key(sh) not in used_system_headers]
+        for system_header in available_system:
+            system_norm = _system_key(system_header)
+            system_matches_const = (
+                system_norm == const_normalized
+                or any(
+                    normalize_header_name(v, for_matching=True) == system_norm
+                    or normalize_header_name(v, for_matching=True) in system_norm
+                    or system_norm in normalize_header_name(v, for_matching=True)
+                    for v in variations
+                )
+            )
+            if not system_matches_const:
+                continue
+            # Prefer exact vendor name match to this system column
+            exact_vendor = None
+            for vendor_header in vendor_headers:
+                if vendor_header in matched_headers:
+                    continue
+                if normalize_header_name(vendor_header, for_matching=True) == system_norm:
+                    exact_vendor = vendor_header
+                    break
+            if exact_vendor and _accept_match(exact_vendor, system_header, const_header):
+                matched = True
+                break
+            # Else take highest-priority hint that reasonably matches this system column
+            if not matched:
+                for vendor_header, _ in high_confidence_hints:
+                    vendor_norm = normalize_header_name(vendor_header, for_matching=True)
+                    if vendor_norm == system_norm or vendor_norm == const_normalized:
+                        if _accept_match(vendor_header, system_header, const_header):
+                            matched = True
+                            break
+            if matched:
+                break
         
-        # Phase 2: Always call AI with ALL headers, passing hints as suggestions
-        # AI will analyze all headers semantically and make the final decision
+        # Phase 2: AI only if no exact match — unused vendor/system headers only
         ai_was_called = False
         ai_explicitly_rejected = False
         
-        # Collect ALL vendor headers that haven't been matched yet
         all_vendor_headers = [vh for vh in vendor_headers if vh not in matched_headers]
-        all_system_headers = list(system_headers)
+        all_system_headers = [sh for sh in system_headers if _system_key(sh) not in used_system_headers]
         
-        # Extract top hints (up to 5) as suggestions for AI
         hint_list = [h[0] for h in high_confidence_hints[:5]] if high_confidence_hints else None
         
-        # Always call AI with all headers (not just filtered candidates)
-        if all_vendor_headers and all_system_headers:
+        if not matched and all_vendor_headers and all_system_headers:
             try:
                 ai_was_called = True
                 ai_selected, usage = _ai_semantic_matching_for_constant_header(
@@ -118,16 +170,13 @@ def match_headers_ai(
                     total_output_tokens += usage.get("output_tokens", 0)
                 if ai_selected:
                     for vendor_h, system_h in ai_selected.items():
-                        if vendor_h not in matched_headers:
-                            # For EMPLOYEE_NUMBER, reject wrong matches (e.g. employee_pf, employee_esi)
-                            if const_header == "EMPLOYEE_NUMBER" and not _is_valid_employee_number_vendor_match(vendor_h):
-                                continue
-                            matched_headers[vendor_h] = system_h
-                            constant_headers_status[const_header] = True
+                        if _accept_match(vendor_h, system_h, const_header):
                             matched = True
                             break
+                    if not matched:
+                        # AI picked an already-used system column or invalid vendor — treat as no match
+                        ai_explicitly_rejected = True
                 else:
-                    # AI returned empty dict - it explicitly rejected all candidates
                     ai_explicitly_rejected = True
             except Exception as e:
                 error_str = str(e).lower()
@@ -143,49 +192,31 @@ def match_headers_ai(
                         "AI validation failed, falling back to priority-based matching",
                         extra={"error": str(e)[:200], "constant_header": const_header}
                     )
-                # AI service failed, but we'll still try fallback
         
-        # Phase 3: Fallback direct matching - Only if AI service failed (exception)
-        # DO NOT fall back if AI explicitly rejected candidates (empty dict)
+        # Phase 3: Fallback direct matching — only if AI service failed (exception)
         if not matched and not ai_explicitly_rejected and ai_was_called:
-            # AI was called but failed - try direct matching with hints as fallback
-            # Try to match with system headers, starting with best vendor header from hints
             for vendor_header, _ in high_confidence_hints:
-                # Check if this vendor header is already matched to a different constant header
                 if vendor_header in matched_headers:
                     continue
-                    
-                vendor_norm = normalize_header_name(vendor_header, for_matching=True)
-                
-                # Find matching system header
                 for system_header in system_headers:
-                    system_norm = normalize_header_name(system_header, for_matching=True)
-                    # Check if system header matches any variation
-                    if any(var in system_norm or system_norm in var for var in variations):
-                        matched_headers[vendor_header] = system_header
-                        constant_headers_status[const_header] = True
-                        matched = True
-                        break
+                    if _system_key(system_header) in used_system_headers:
+                        continue
+                    system_norm = _system_key(system_header)
+                    if any(
+                        normalize_header_name(var, for_matching=True) in system_norm
+                        or system_norm in normalize_header_name(var, for_matching=True)
+                        for var in variations
+                    ):
+                        if _accept_match(vendor_header, system_header, const_header):
+                            matched = True
+                            break
                 if matched:
                     break
         
-        # Phase 4: Fallback - Only needed if Phase 2 AI failed or was not called
-        # Since Phase 2 now always calls AI with all headers, this phase is rarely needed
-        # But keep it as a safety net for edge cases
+        # Phase 4: Fallback if AI was never called
         if not matched and not ai_was_called:
-            # This should rarely happen now, but keep as fallback
-            # Collect ALL vendor headers that haven't been matched yet
-            potential_vendor = []
-            for vendor_header in vendor_headers:
-                # Skip if already matched to a different constant header
-                if vendor_header not in matched_headers:
-                    potential_vendor.append(vendor_header)
-            
-            # Collect ALL system headers
-            potential_system = list(system_headers)
-            
-            # Use AI to autonomously analyze and match - AI will find matches based on semantic understanding
-            # Pass hints if available
+            potential_vendor = [vh for vh in vendor_headers if vh not in matched_headers]
+            potential_system = [sh for sh in system_headers if _system_key(sh) not in used_system_headers]
             hint_list = [h[0] for h in high_confidence_hints[:5]] if high_confidence_hints else None
             if potential_vendor and potential_system:
                 try:
@@ -197,11 +228,7 @@ def match_headers_ai(
                         total_output_tokens += usage.get("output_tokens", 0)
                     if ai_matches:
                         for vendor_h, system_h in ai_matches.items():
-                            if vendor_h not in matched_headers:
-                                if const_header == "EMPLOYEE_NUMBER" and not _is_valid_employee_number_vendor_match(vendor_h):
-                                    continue
-                                matched_headers[vendor_h] = system_h
-                                constant_headers_status[const_header] = True
+                            if _accept_match(vendor_h, system_h, const_header):
                                 matched = True
                                 break
                 except Exception as e:
@@ -216,7 +243,7 @@ def match_headers_ai(
                     else:
                         logger.warning(
                             f"AI semantic matching failed for constant header",
-                            extra={"error": str(e)[:100], "constant_header": const_header}  # Truncate error message
+                            extra={"error": str(e)[:100], "constant_header": const_header}
                         )
         
         if not matched:
@@ -377,10 +404,10 @@ ALL SYSTEM HEADERS (pick the system header that best corresponds to the constant
 
 RULES:
 1. Infer the business meaning of "{const_header}" from its name and the guidance above
-2. Same concept can have different names (synonyms or equivalent terms); match when vendor and constant mean the same thing
-3. Match a vendor header to this constant if they represent the SAME business concept; the vendor header may not be in expected variations or hints
-4. Return the system header that corresponds to this constant (often the constant itself or a normalized form)
-5. Reject only when the vendor header clearly means something different
+2. Return EXACTLY ONE pair: one vendor header → one system header for this constant only
+3. Prefer an EXACT name match when available (e.g. constant "DA" / system "da" → vendor "da", NOT "el_days" or "arrear_da")
+4. Do NOT map a different concept to this constant (e.g. do not map "fixed_basic" to "basic" when matching constant "FIXED_BASIC" if "fixed_basic" exists as its own system header)
+5. The system header must be the one that corresponds to THIS constant (often the constant name itself or a close synonym), not a related sibling column
 6. When unsure, return {{}} (empty object)
 
 Return JSON only: {{"vendor_header": "system_header"}} for one match, or {{}} if no good match.

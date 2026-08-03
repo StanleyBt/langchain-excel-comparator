@@ -28,10 +28,22 @@ def is_not_applicable_item(status: Any, mapped_vendor_headers: List[str]) -> boo
 
 
 def build_unmatched_vendor_header_list(vendor_data: List[Dict[str, Any]]) -> List[str]:
-    """All unique vendor column names from vendorPaysheetData plus 'Not Applicable', sorted A–Z."""
-    headers = {str(k) for row in vendor_data for k in row.keys()}
-    headers.add(NOT_APPLICABLE)
-    return sorted(headers, key=lambda h: h.casefold())
+    """All unique vendor column names from vendorPaysheetData plus 'Not Applicable', sorted A–Z.
+
+    Dedupes case-insensitively (e.g. 'HRA Amount' and 'hra amount' → one entry).
+    Keeps the first spelling seen in the payload.
+    """
+    seen: Dict[str, str] = {}  # casefold key -> original spelling to keep
+    for row in vendor_data:
+        for key in row.keys():
+            name = str(key).strip()
+            if not name:
+                continue
+            fold = name.casefold()
+            if fold not in seen:
+                seen[fold] = name
+    seen[NOT_APPLICABLE.casefold()] = NOT_APPLICABLE
+    return sorted(seen.values(), key=lambda h: h.casefold())
 
 
 def _mapping_system_header(value: Any) -> str:

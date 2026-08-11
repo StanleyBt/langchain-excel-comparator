@@ -17,7 +17,7 @@ from utils.data_processor import system_json_to_dataframe, vendor_json_to_datafr
 from utils.header_matching import match_headers_ai
 from utils.comparison_engine import compare_rows
 from utils.helpers import normalize_header_mapping, build_unmatched_vendor_header_list, is_not_applicable_item
-from config import LOG_LEVEL, LOG_JSON, LOG_FILE, CORS_ORIGINS, compute_token_cost
+from config import LOG_LEVEL, LOG_JSON, LOG_FILE, CORS_ORIGINS, compute_token_cost, azure_openai_configured, azure_openai_config_status, AZURE_DEPLOYMENT_NAME, AZURE_ENDPOINT, AZURE_API_KEY, AZURE_API_VERSION, AZURE_OPENAI_TIMEOUT
 from utils.logger import setup_logging, get_logger
 
 # Set up structured logging
@@ -117,6 +117,41 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "Paysheet Comparator API"}
+
+
+@app.get("/health/ai")
+async def ai_health_check():
+    """Check Azure OpenAI config and connectivity (no secrets returned)."""
+    configured = azure_openai_configured()
+    result = {
+        "configured": configured,
+        "envVars": azure_openai_config_status(),
+        "deployment": AZURE_DEPLOYMENT_NAME if configured else None,
+        "endpointHost": AZURE_ENDPOINT.split("//")[-1].split("/")[0] if AZURE_ENDPOINT else None,
+        "reachable": False,
+        "error": None,
+    }
+    if not configured:
+        missing = [k for k, v in result["envVars"].items() if not v]
+        result["error"] = f"Missing env vars: {', '.join(missing)}"
+        return result
+    try:
+        from langchain_openai import AzureChatOpenAI
+        from langchain.schema import HumanMessage
+        llm = AzureChatOpenAI(
+            deployment_name=AZURE_DEPLOYMENT_NAME,
+            temperature=0,
+            azure_endpoint=AZURE_ENDPOINT,
+            api_key=AZURE_API_KEY,
+            api_version=AZURE_API_VERSION,
+            timeout=min(AZURE_OPENAI_TIMEOUT, 30),
+            max_retries=0,
+        )
+        llm.invoke([HumanMessage(content='Reply with exactly: ok')])
+        result["reachable"] = True
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    return result
 
 @app.get("/")
 async def root():

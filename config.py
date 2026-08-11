@@ -15,6 +15,19 @@ AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
 AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME")
 AZURE_API_VERSION = os.getenv("AZURE_API_VERSION")
 
+
+def azure_openai_configured() -> bool:
+    return all([AZURE_API_KEY, AZURE_ENDPOINT, AZURE_DEPLOYMENT_NAME, AZURE_API_VERSION])
+
+
+def azure_openai_config_status() -> Dict[str, bool]:
+    return {
+        "AZURE_API_KEY": bool(AZURE_API_KEY),
+        "AZURE_ENDPOINT": bool(AZURE_ENDPOINT),
+        "AZURE_DEPLOYMENT_NAME": bool(AZURE_DEPLOYMENT_NAME),
+        "AZURE_API_VERSION": bool(AZURE_API_VERSION),
+    }
+
 # Azure OpenAI timeout configuration (in seconds)
 # Default: 60 seconds. Increase if you have very large prompts (>50 headers) or slow network.
 # Typical response time: 5-20 seconds. 60s provides buffer for network delays and service load.

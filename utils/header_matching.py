@@ -16,6 +16,45 @@ from utils.logger import get_logger
 
 logger = get_logger("header_matching")
 
+_PLACEHOLDER_HEADER_NAMES = {
+    "header",
+    "vendor_header",
+    "system_header",
+    "column",
+    "column_name",
+    "field",
+    "field_name",
+    "value",
+    "unnamed",
+}
+
+
+def _normalized_header(value: str) -> str:
+    return normalize_header_name(str(value), for_matching=True)
+
+
+def _is_placeholder_header(value: str) -> bool:
+    """Reject metadata/placeholder labels that do not represent payroll data."""
+    normalized = _normalized_header(value)
+    if normalized in _PLACEHOLDER_HEADER_NAMES:
+        return True
+    return normalized.startswith("unnamed_")
+
+
+def _eligible_system_headers(
+    const_header: str,
+    system_headers: List[str],
+    variations: List[str],
+) -> List[str]:
+    """Limit AI to the system column represented by the current constant."""
+    const_normalized = _normalized_header(const_header)
+    exact = [header for header in system_headers if _normalized_header(header) == const_normalized]
+    if exact:
+        return exact
+
+    variation_keys = {_normalized_header(variation) for variation in variations}
+    return [header for header in system_headers if _normalized_header(header) in variation_keys]
+
 
 def match_headers_ai(
     df_vendor: pd.DataFrame, 
@@ -49,11 +88,30 @@ def match_headers_ai(
     def _system_key(system_header: str) -> str:
         return normalize_header_name(system_header, for_matching=True)
 
-    def _accept_match(vendor_h: str, system_h: str, const_header: str) -> bool:
-        """Accept at most one vendor→system pair; system column must be unused."""
+    def _accept_match(
+        vendor_h: str,
+        system_h: str,
+        const_header: str,
+        eligible_system_keys: set,
+    ) -> bool:
+        """Validate AI output and accept at most one vendor→system pair."""
+        if vendor_h not in vendor_headers or system_h not in system_headers:
+            return False
+        if _is_placeholder_header(vendor_h):
+            logger.warning(
+                "Rejected placeholder vendor header returned by AI",
+                extra={"constant_header": const_header},
+            )
+            return False
         if vendor_h in matched_headers:
             return False
         sys_key = _system_key(system_h)
+        if sys_key not in eligible_system_keys:
+            logger.warning(
+                "Rejected system header unrelated to current constant",
+                extra={"constant_header": const_header},
+            )
+            return False
         if sys_key in used_system_headers:
             return False
         if const_header == "EMPLOYEE_NUMBER" and not _is_valid_employee_number_vendor_match(vendor_h):
@@ -73,6 +131,13 @@ def match_headers_ai(
         # Always include the constant's own normalized name as a variation
         if const_normalized not in variations:
             variations = [const_normalized] + list(variations)
+
+        eligible_system_headers = _eligible_system_headers(
+            const_header, system_headers, variations
+        )
+        eligible_system_keys = {
+            _system_key(header) for header in eligible_system_headers
+        }
         
         # Phase 1: Create hints from variations (suggestions, not filters)
         high_confidence_hints = []  # List of (vendor_header, priority_score)
@@ -110,7 +175,10 @@ def match_headers_ai(
 
         # Phase 1.5: Exact / near-exact match first (one vendor + one unused system column)
         # Prefer vendor name == system name == constant (e.g. da → da for constant DA)
-        available_system = [sh for sh in system_headers if _system_key(sh) not in used_system_headers]
+        available_system = [
+            sh for sh in eligible_system_headers
+            if _system_key(sh) not in used_system_headers
+        ]
         for system_header in available_system:
             system_norm = _system_key(system_header)
             system_matches_const = (
@@ -132,7 +200,9 @@ def match_headers_ai(
                 if normalize_header_name(vendor_header, for_matching=True) == system_norm:
                     exact_vendor = vendor_header
                     break
-            if exact_vendor and _accept_match(exact_vendor, system_header, const_header):
+            if exact_vendor and _accept_match(
+                exact_vendor, system_header, const_header, eligible_system_keys
+            ):
                 matched = True
                 break
             # Else take highest-priority hint that reasonably matches this system column
@@ -140,7 +210,9 @@ def match_headers_ai(
                 for vendor_header, _ in high_confidence_hints:
                     vendor_norm = normalize_header_name(vendor_header, for_matching=True)
                     if vendor_norm == system_norm or vendor_norm == const_normalized:
-                        if _accept_match(vendor_header, system_header, const_header):
+                        if _accept_match(
+                            vendor_header, system_header, const_header, eligible_system_keys
+                        ):
                             matched = True
                             break
             if matched:
@@ -150,8 +222,14 @@ def match_headers_ai(
         ai_was_called = False
         ai_explicitly_rejected = False
         
-        all_vendor_headers = [vh for vh in vendor_headers if vh not in matched_headers]
-        all_system_headers = [sh for sh in system_headers if _system_key(sh) not in used_system_headers]
+        all_vendor_headers = [
+            vh for vh in vendor_headers
+            if vh not in matched_headers and not _is_placeholder_header(vh)
+        ]
+        all_system_headers = [
+            sh for sh in eligible_system_headers
+            if _system_key(sh) not in used_system_headers
+        ]
         
         hint_list = [h[0] for h in high_confidence_hints[:5]] if high_confidence_hints else None
         
@@ -170,7 +248,9 @@ def match_headers_ai(
                     total_output_tokens += usage.get("output_tokens", 0)
                 if ai_selected:
                     for vendor_h, system_h in ai_selected.items():
-                        if _accept_match(vendor_h, system_h, const_header):
+                        if _accept_match(
+                            vendor_h, system_h, const_header, eligible_system_keys
+                        ):
                             matched = True
                             break
                     if not matched:
@@ -207,7 +287,9 @@ def match_headers_ai(
                         or system_norm in normalize_header_name(var, for_matching=True)
                         for var in variations
                     ):
-                        if _accept_match(vendor_header, system_header, const_header):
+                        if _accept_match(
+                            vendor_header, system_header, const_header, eligible_system_keys
+                        ):
                             matched = True
                             break
                 if matched:
@@ -215,8 +297,14 @@ def match_headers_ai(
         
         # Phase 4: Fallback if AI was never called
         if not matched and not ai_was_called:
-            potential_vendor = [vh for vh in vendor_headers if vh not in matched_headers]
-            potential_system = [sh for sh in system_headers if _system_key(sh) not in used_system_headers]
+            potential_vendor = [
+                vh for vh in vendor_headers
+                if vh not in matched_headers and not _is_placeholder_header(vh)
+            ]
+            potential_system = [
+                sh for sh in eligible_system_headers
+                if _system_key(sh) not in used_system_headers
+            ]
             hint_list = [h[0] for h in high_confidence_hints[:5]] if high_confidence_hints else None
             if potential_vendor and potential_system:
                 try:
@@ -228,7 +316,9 @@ def match_headers_ai(
                         total_output_tokens += usage.get("output_tokens", 0)
                     if ai_matches:
                         for vendor_h, system_h in ai_matches.items():
-                            if _accept_match(vendor_h, system_h, const_header):
+                            if _accept_match(
+                                vendor_h, system_h, const_header, eligible_system_keys
+                            ):
                                 matched = True
                                 break
                 except Exception as e:
@@ -408,7 +498,9 @@ RULES:
 3. Prefer an EXACT name match when available (e.g. constant "DA" / system "da" → vendor "da", NOT "el_days" or "arrear_da")
 4. Do NOT map a different concept to this constant (e.g. do not map "fixed_basic" to "basic" when matching constant "FIXED_BASIC" if "fixed_basic" exists as its own system header)
 5. The system header must be the one that corresponds to THIS constant (often the constant name itself or a close synonym), not a related sibling column
-6. When unsure, return {{}} (empty object)
+6. NEVER select placeholder or metadata labels such as "vendor_header", "system_header", "header", "column", "field", "value", or "unnamed"
+7. Payroll concepts are not interchangeable: deduction is not gross/payable, bonus is not base value, allowance is not service charge, and holiday pay is not invoice amount
+8. A weak lexical resemblance is insufficient. When the business meaning is uncertain, return {{}} (empty object)
 
 Return JSON only: {{"vendor_header": "system_header"}} for one match, or {{}} if no good match.
 """

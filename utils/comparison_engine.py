@@ -21,20 +21,18 @@ _SYSTEM_EMPLOYEE_NUMBER_NORMALIZED = normalize_header_name("EMPLOYEE_NUMBER")
 
 def format_column_name(column_name: str) -> str:
     """
-    Convert a column name to a clean, readable format.
+    Convert a column name to a clean, uppercase display format.
     
     Examples:
-        "EMPLOYEE_NUMBER" -> "Employee Number"
-        "employee number" -> "Employee Number"
-        "invoice_value" -> "Invoice Value"
-        "CONTRACTOR" -> "Contractor"
-        "previous_month_calendar_days" -> "Previous Month Calendar Days"
+        "EMPLOYEE_NUMBER" -> "EMPLOYEE NUMBER"
+        "employee number" -> "EMPLOYEE NUMBER"
+        "invoice_value" -> "INVOICE VALUE"
     
     Args:
         column_name: Raw column name (can be vendor or system column name)
         
     Returns:
-        Formatted column name with proper capitalization
+        Formatted uppercase column name
     """
     if not column_name:
         return ""
@@ -45,18 +43,7 @@ def format_column_name(column_name: str) -> str:
     # Replace underscores and multiple spaces with single space
     col = re.sub(r'[_\s]+', ' ', col)
     
-    # Split by spaces and capitalize each word
-    words = col.split()
-    formatted_words = []
-    
-    for word in words:
-        # Convert to lowercase first, then capitalize first letter
-        word_lower = word.lower()
-        # Capitalize first letter of each word
-        formatted_word = word_lower.capitalize()
-        formatted_words.append(formatted_word)
-    
-    return ' '.join(formatted_words)
+    return col.upper()
 
 
 def is_text_only_column(column_name: str) -> bool:
@@ -415,7 +402,7 @@ def compare_rows(
         emp_num_comp = compare_column_values(
             str(emp_id),
             str(emp_id),
-            "Employee Head Count"
+            "EMPLOYEE HEAD COUNT"
         )
         column_comparisons.append(emp_num_comp)
         

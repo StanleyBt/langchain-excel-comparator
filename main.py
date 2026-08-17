@@ -205,8 +205,8 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
                 match_type = "exact" if vendor_header == system_header else "semantic"
                 matched_headers_list.append(
                     HeaderMatch(
-                        vendorHeader=vendor_header,
-                        systemHeader=system_header,
+                        vendorHeader=vendor_header.upper(),
+                        systemHeader=system_header.upper(),
                         matchType=match_type
                     )
                 )
@@ -215,12 +215,20 @@ async def match_headers(http_request: Request, request: HeaderMatchingRequest):
             matched_count = sum(1 for status in constant_headers_status.values() if status)
             total_count = len(constant_headers_status)
             
-            unmatched_vendor_headers = build_unmatched_vendor_header_list(request.vendorPaysheetData)
+            unmatched_vendor_headers = [
+                header.upper()
+                for header in build_unmatched_vendor_header_list(request.vendorPaysheetData)
+            ]
             response = HeaderMatchingResponse(
                 matchedHeaders=matched_headers_list,
-                unmatchedConstantHeaders=unmatched_constant_header_names,
+                unmatchedConstantHeaders=[
+                    header.upper() for header in unmatched_constant_header_names
+                ],
                 unmatchedVendorHeaders=unmatched_vendor_headers,
-                constantHeadersStatus=constant_headers_status,
+                constantHeadersStatus={
+                    header.upper(): status
+                    for header, status in constant_headers_status.items()
+                },
                 message=f"Constant headers matching completed. {matched_count}/{total_count} constant headers matched. {len(unmatched_vendor_headers)} vendor headers.",
                 month=request.month,
                 processingStage=request.processingStage,

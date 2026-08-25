@@ -1,4 +1,5 @@
 # utils/comparison_engine.py
+import math
 import pandas as pd
 import re
 from typing import Dict, List, Optional, Any, Tuple
@@ -17,6 +18,20 @@ logger = get_logger("comparison_engine")
 # System paysheet always uses EMPLOYEE_NUMBER; no variations.
 # Use normalize_header_name so "employee_number", "employeenumber", "EMPLOYEE_NUMBER" all match.
 _SYSTEM_EMPLOYEE_NUMBER_NORMALIZED = normalize_header_name("EMPLOYEE_NUMBER")
+
+
+def json_safe_value(value: Any) -> Any:
+    """Convert NaN/Inf (and pandas NA) to None so responses are JSON-serializable."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    return value
 
 
 def format_column_name(column_name: str) -> str:
@@ -152,8 +167,8 @@ def compare_column_values(
         # Both None/NaN - consider as match
         return ColumnComparison(
             columnName=column_name,
-            vendorValue=vendor_value,
-            systemValue=system_value,
+            vendorValue=None,
+            systemValue=None,
             difference=None,
             isMatch=True,
             matchType="both_none"
@@ -167,8 +182,8 @@ def compare_column_values(
         # For text-only columns, preserve original string representation
         if force_text:
             # For text-only columns, compare as exact strings (preserve case/format)
-            vendor_str = str(vendor_value).strip() if vendor_value is not None and not pd.isna(vendor_value) else ""
-            system_str = str(system_value).strip() if system_value is not None and not pd.isna(system_value) else ""
+            vendor_str = str(vendor_value).strip() if not vendor_is_none else ""
+            system_str = str(system_value).strip() if not system_is_none else ""
             is_match = vendor_str == system_str
             match_type = "text_exact" if is_match else "text_mismatch"
         else:
@@ -179,9 +194,9 @@ def compare_column_values(
     
     return ColumnComparison(
         columnName=column_name,
-        vendorValue=vendor_value,
-        systemValue=system_value,
-        difference=difference,
+        vendorValue=json_safe_value(vendor_value),
+        systemValue=json_safe_value(system_value),
+        difference=json_safe_value(difference),
         isMatch=is_match,
         matchType=match_type
     )

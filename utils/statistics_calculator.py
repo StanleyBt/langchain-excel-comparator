@@ -1,4 +1,5 @@
 # utils/statistics_calculator.py
+import math
 from typing import List, Dict, Any, Optional, Tuple
 from models.schemas import (
     RowComparisonResult, ColumnComparison, OverallSummary, ColumnStatistic,
@@ -122,7 +123,8 @@ def calculate_column_statistics(
                 if cc.vendorValue is not None:
                     try:
                         vendor_val = float(cc.vendorValue)
-                        vendor_numeric_values.append(vendor_val)
+                        if math.isfinite(vendor_val):
+                            vendor_numeric_values.append(vendor_val)
                     except (ValueError, TypeError):
                         pass
                 
@@ -130,7 +132,8 @@ def calculate_column_statistics(
                 if cc.systemValue is not None:
                     try:
                         system_val = float(cc.systemValue)
-                        system_numeric_values.append(system_val)
+                        if math.isfinite(system_val):
+                            system_numeric_values.append(system_val)
                     except (ValueError, TypeError):
                         pass
             

@@ -96,16 +96,14 @@ def is_text_only_column(column_name: str) -> bool:
 def is_numeric_match(val1: Any, val2: Any, tolerance: float = 2.00) -> Tuple[bool, Optional[float]]:
     """
     Check if two numeric values match within tolerance.
+    Missing/None/NaN values are treated as 0 (empty payroll cells).
     
     Returns:
         Tuple of (is_match, difference)
     """
     try:
-        v1 = float(val1) if val1 is not None and not pd.isna(val1) else None
-        v2 = float(val2) if val2 is not None and not pd.isna(val2) else None
-        
-        if v1 is None or v2 is None:
-            return False, None
+        v1 = float(val1) if val1 is not None and not pd.isna(val1) else 0.0
+        v2 = float(val2) if val2 is not None and not pd.isna(val2) else 0.0
         
         diff = v1 - v2
         is_match = abs(diff) <= tolerance
@@ -146,25 +144,33 @@ def compare_column_values(
     """
     # Check if this column should always be treated as text (e.g., EMPLOYEE_NUMBER)
     force_text = is_text_only_column(column_name)
-    
-    # Determine if column is numeric based on values (only if not forced to text)
+
+    vendor_is_none = vendor_value is None or pd.isna(vendor_value)
+    system_is_none = system_value is None or pd.isna(system_value)
+
+    # Determine if column is numeric based on present values (only if not forced to text)
     is_numeric = False
     if not force_text:
         try:
-            if vendor_value is not None and not pd.isna(vendor_value):
+            if not vendor_is_none:
                 float(vendor_value)
-            if system_value is not None and not pd.isna(system_value):
+            if not system_is_none:
                 float(system_value)
             is_numeric = True
         except (ValueError, TypeError):
             pass
-    
-    # Handle None/NaN values
-    vendor_is_none = vendor_value is None or pd.isna(vendor_value)
-    system_is_none = system_value is None or pd.isna(system_value)
-    
+
     if vendor_is_none and system_is_none:
-        # Both None/NaN - consider as match
+        if is_numeric and not force_text:
+            # Empty numeric cells → treat as 0 vs 0
+            return ColumnComparison(
+                columnName=column_name,
+                vendorValue=0.0,
+                systemValue=0.0,
+                difference=0.0,
+                isMatch=True,
+                matchType="numeric_tolerance"
+            )
         return ColumnComparison(
             columnName=column_name,
             vendorValue=None,
@@ -173,30 +179,37 @@ def compare_column_values(
             isMatch=True,
             matchType="both_none"
         )
-    
+
     if is_numeric and not force_text:
-        is_match, difference = is_numeric_match(vendor_value, system_value)
+        # Missing numeric side → 0 (UI shows 0 / difference instead of N/A)
+        vendor_for_compare = 0.0 if vendor_is_none else float(vendor_value)
+        system_for_compare = 0.0 if system_is_none else float(system_value)
+        is_match, difference = is_numeric_match(vendor_for_compare, system_for_compare)
         match_type = "numeric_tolerance" if is_match else "numeric_mismatch"
+        return ColumnComparison(
+            columnName=column_name,
+            vendorValue=json_safe_value(vendor_for_compare),
+            systemValue=json_safe_value(system_for_compare),
+            difference=json_safe_value(difference),
+            isMatch=is_match,
+            matchType=match_type
+        )
+
+    # Text matching for text-only columns or non-numeric values
+    if force_text:
+        vendor_str = str(vendor_value).strip() if not vendor_is_none else ""
+        system_str = str(system_value).strip() if not system_is_none else ""
+        is_match = vendor_str == system_str
+        match_type = "text_exact" if is_match else "text_mismatch"
     else:
-        # Always use text matching for text-only columns or non-numeric values
-        # For text-only columns, preserve original string representation
-        if force_text:
-            # For text-only columns, compare as exact strings (preserve case/format)
-            vendor_str = str(vendor_value).strip() if not vendor_is_none else ""
-            system_str = str(system_value).strip() if not system_is_none else ""
-            is_match = vendor_str == system_str
-            match_type = "text_exact" if is_match else "text_mismatch"
-        else:
-            # For regular text columns, use normalized comparison
-            is_match = is_text_match(vendor_value, system_value)
-            match_type = "text_normalized" if is_match else "text_mismatch"
-        difference = None
-    
+        is_match = is_text_match(vendor_value, system_value)
+        match_type = "text_normalized" if is_match else "text_mismatch"
+
     return ColumnComparison(
         columnName=column_name,
         vendorValue=json_safe_value(vendor_value),
         systemValue=json_safe_value(system_value),
-        difference=json_safe_value(difference),
+        difference=None,
         isMatch=is_match,
         matchType=match_type
     )
